@@ -78,8 +78,13 @@ class TestSettings:
         with pytest.raises(ValidationError):
             settings.chunk_size = 9999
 
-    def test_missing_required_env_var_raises(self):
+    def test_missing_required_env_var_raises(self, monkeypatch, tmp_path):
         """Missing required env vars raise validation error."""
+        monkeypatch.delenv("PINECONE_INDEX_NAME", raising=False)
+        monkeypatch.delenv("DYNAMODB_TABLE_NAME", raising=False)
+        monkeypatch.delenv("S3_BUCKET_NAME", raising=False)
+        monkeypatch.chdir(tmp_path)  # avoid loading .env from project root
+
         from config.settings import Settings
 
         with pytest.raises(ValidationError):
