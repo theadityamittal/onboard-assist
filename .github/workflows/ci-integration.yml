@@ -37,4 +37,5 @@ jobs:
         run: |
           pytest tests/integration/ \
             -v \
-            -m integration
+            -m integration \
+            --no-cov
