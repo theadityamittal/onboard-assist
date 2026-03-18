@@ -26,3 +26,10 @@ repos:
         types: [python]
         pass_filenames: false
         stages: [pre-commit]
+      - id: sam-validate
+        name: sam validate
+        entry: sam validate --template infra/template.yaml --lint
+        language: system
+        files: ^infra/template\.yaml$
+        pass_filenames: false
+        stages: [pre-commit]
