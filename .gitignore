@@ -3,6 +3,8 @@
 .env
 .env.*
 !.env.example
+
+# Claude Code
 CLAUDE.md
 .claude/
 .understand-anything
@@ -32,22 +34,15 @@ share/python-wheels/
 *.egg
 MANIFEST
 
-# PyInstaller
-*.manifest
-*.spec
-
 # Testing and coverage
 .pytest_cache/
 .coverage
+.coverage.*
 htmlcov/
+coverage.xml
 .tox/
 .nox/
-.coverage.*
 .cache
-nosetests.xml
-coverage.xml
-*.cover
-*.py,cover
 .hypothesis/
 
 # Type checking
@@ -62,44 +57,9 @@ dmypy.json
 *.swo
 *~
 
-# Database files
-*.sqlite3
-*.db
-chroma_db/
-chroma_db/*
-
-# Project-specific caches and data
-.embedding_cache
-data/crawl_cache.json
-data/eval/
-
-# Temporary and generated files
-test_docs/
-*_validation_report.txt
-*_test.py
-*_benchmark.py
-*_integration_test.py
-*_comprehensive_test.py
-*_performance_benchmark.py
-architecture_validation_*.txt
-phase*.txt
-phase*.py
-
-# OS files
-.DS_Store
-.DS_Store?
-._*
-.Spotlight-V100
-.Trashes
-ehthumbs.db
-Thumbs.db
-
-# Logs
-*.log
-logs/
-
 # SAM build artifacts
 .aws-sam/
+samconfig.toml
 samconfig.toml.bak
 
 # Pinecone
@@ -107,3 +67,11 @@ pinecone_data/
 
 # Lambda layers
 layers/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
