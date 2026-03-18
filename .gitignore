@@ -3,6 +3,9 @@
 .env
 .env.*
 !.env.example
+CLAUDE.md
+.claude/
+.understand-anything
 
 # Python
 __pycache__/
