@@ -1,6 +1,7 @@
 """Tests for configuration settings module."""
 
 import pytest
+from pydantic import ValidationError
 
 
 class TestSettings:
@@ -74,14 +75,14 @@ class TestSettings:
         from config.settings import Settings
 
         settings = Settings()
-        with pytest.raises(Exception):
+        with pytest.raises(ValidationError):
             settings.chunk_size = 9999
 
     def test_missing_required_env_var_raises(self):
         """Missing required env vars raise validation error."""
         from config.settings import Settings
 
-        with pytest.raises(Exception):
+        with pytest.raises(ValidationError):
             Settings()
 
     def test_get_settings_returns_cached_instance(self, monkeypatch):

@@ -15,7 +15,12 @@ from pydantic_settings import BaseSettings
 class Settings(BaseSettings):
     """Immutable application settings loaded from environment variables."""
 
-    model_config = {"frozen": True, "env_file": ".env", "extra": "ignore"}
+    model_config = {
+        "frozen": True,
+        "env_file": ".env",
+        "extra": "ignore",
+        "populate_by_name": True,
+    }
 
     # --- AWS ---
     aws_region: str = Field(alias="AWS_DEFAULT_REGION", default="us-east-1")
@@ -71,4 +76,4 @@ class Settings(BaseSettings):
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     """Return cached Settings instance. Call once per Lambda cold start."""
-    return Settings()
+    return Settings()  # type: ignore[call-arg]
