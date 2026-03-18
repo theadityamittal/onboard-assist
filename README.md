@@ -1,525 +1,286 @@
-# RAG Explorer
+# Onboard Assist
 
-[![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
+[![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
+[![CI](https://github.com/theadityamittal/onboard-assist/actions/workflows/ci.yml/badge.svg)](https://github.com/theadityamittal/onboard-assist/actions)
+[![Coverage: 99%](https://img.shields.io/badge/coverage-99%25-brightgreen.svg)]()
 
-**Simple personal RAG exploration tool** - Transform your documents into an intelligent Q&A system with multiple AI provider support.
+Adaptive AI-driven Slack bot that onboards volunteers at nonprofit organizations. Asks intake questions, generates a personalized plan, walks through it conversationally using the org's knowledge base, and takes real actions — assigning Slack channels, creating calendar events, and tracking progress across sessions.
 
-## 🎯 Project Description
+Built as a generic platform with [Changing the Present](https://changingthepresent.org) as the demo tenant.
 
-RAG Explorer is a Retrieval-Augmented Generation (RAG) tool designed for personal document analysis and Q&A. It combines document indexing, vector search, and multiple AI providers to create an intelligent knowledge base from your documents.
+## Problem
 
-### ✨ Key Features
+Nonprofit volunteer onboarding is manual, inconsistent, and time-consuming. New volunteers get different information depending on who onboards them, team leads repeat the same orientation dozens of times, and there's no tracking of who completed what.
 
-- **Multiple AI Providers**: Support for OpenAI GPT, Google Gemini, Anthropic Claude, and local Ollama models
-- **Smart Document Processing**: Automatic chunking and embedding of various document formats
-- **Confidence Scoring**: 4-factor algorithm (similarity, count, keywords, content length) for result quality
-- **Rich CLI Interface**: Beautiful terminal interface with progress indicators and formatted output
-- **Local & Cloud Options**: Use local Ollama models for privacy or cloud APIs for performance
-- **Vector Search**: ChromaDB-powered semantic search with configurable parameters
-- **Website Crawling**: Index content directly from websites
-- **Interactive Configuration**: Built-in configuration management
+## How It Works
 
-### 🎯 Use Cases
-
-- **Personal Knowledge Base**: Index your notes, documents, and research materials
-- **Document Analysis**: Ask questions about large document collections
-- **Research Assistant**: Quick retrieval of relevant information from your data
-- **Privacy-Focused**: Option to run entirely locally with Ollama
-
-## 🚀 Installation
-
-### Prerequisites
-
-- Python 3.9 or higher
-- Git
-
-### Quick Install
-
-```bash
-# Clone the repository
-git clone https://github.com/theadityamittal/rag-explorer.git
-cd rag-explorer
-
-# Install in development mode
-pip install -e .
-
-# Verify installation
-rag-explorer --help
+```
+1. Workspace admin installs via "Add to Slack" OAuth flow
+2. Admin provides org website URL → bot scrapes and indexes the knowledge base
+3. New volunteer joins workspace → bot DMs them automatically
+4. Intake questions determine role and experience level
+5. Personalized onboarding plan generated (5-8 steps)
+6. Bot walks through plan conversationally:
+   - Answers questions from the knowledge base (RAG)
+   - Assigns volunteer to relevant Slack channels
+   - Creates orientation meeting on Google Calendar
+   - Tracks progress, resumes across sessions
+   - Adapts the plan when context changes
+7. Completion record saved for audit trail
 ```
 
-### Recommended: Virtual Environment
+## Architecture
+
+```
+                         ┌──────────────────────────────┐
+                         │     API Gateway (REST)        │
+                         │  5 routes (Slack + OAuth)     │
+                         └──────┬───────────────┬───────┘
+                                │               │
+                     events/commands        OAuth callbacks
+                                │               │
+                                v               v
+                         ┌────────────┐  ┌────────────┐  ┌────────────┐
+                         │   Slack    │  │Slack OAuth │  │Google OAuth│
+                         │  Handler   │  │  Lambda    │  │  Callback  │
+                         │  Lambda    │  │            │  │  Lambda    │
+                         └─────┬──────┘  └────────────┘  └────────────┘
+                               │
+                    signature verify
+                    middleware chain
+                    enqueue to SQS
+                               │
+                               v
+                         ┌────────────┐       ┌────────────┐
+                         │  SQS FIFO  │──────>│  SQS DLQ   │
+                         │  Queue     │       │  (3 fails) │
+                         └─────┬──────┘       └────────────┘
+                               │
+                               v
+┌──────────────────────────────────────────────────────────────────┐
+│                      Agent Worker Lambda                         │
+│                                                                  │
+│  Orchestrator (Plan + ReAct + Tool Calling)                      │
+│      │                                                           │
+│      ├── search_kb ──────────────────────────────> Pinecone      │
+│      ├── send_message ───────────────────────────> Slack API     │
+│      ├── assign_channel ─────────────────────────> Slack API     │
+│      ├── calendar_event ─────────────────────────> Google Cal    │
+│      └── manage_progress ────────────────────────> DynamoDB      │
+│                                                                  │
+│  LLM Router: Nova Micro (reasoning) + Haiku (generation)         │
+│  Agent Middleware: turn budget, tool validator, output validator   │
+└──────────────────────────────────────────────────────────────────┘
+
+Supporting: DynamoDB (state) | S3 (docs) | Secrets Manager | CloudWatch
+Scheduled: Health Check (daily) | Nudge (daily) | Kill Switch (budget SNS)
+```
+
+### Seven Lambda Functions
+
+| Lambda | Trigger | Purpose |
+|---|---|---|
+| Slack Handler | API Gateway POST | Parse events, run inbound middleware, enqueue to SQS |
+| Slack OAuth | API Gateway GET | Exchange auth code for bot token, store in DynamoDB |
+| Google OAuth | API Gateway GET | Exchange auth code for refresh token, resume blocked steps |
+| Agent Worker | SQS FIFO | Process messages, run orchestrator, reply via Slack |
+| Kill Switch | SNS (budget alarm) | Disable API Gateway, set DynamoDB flag |
+| Health Check | EventBridge (daily 8am) | Ping Pinecone index, recreate if paused |
+| Nudge | EventBridge (daily 2pm) | DM inactive users after 7 days |
+
+### Inbound Middleware Chain
+
+Ordered cheapest to most expensive — short-circuits on first rejection:
+
+| # | Middleware | Cost | On Failure |
+|---|---|---|---|
+| 1 | Signature Verification | CPU | Reject (forged request) |
+| 2 | Bot Filter | CPU | Drop (prevent self-loops) |
+| 3 | Empty Filter | CPU | Drop (blank messages) |
+| 4 | Rate Limiter | 1 DynamoDB write | Respond ("Still working on your previous message...") |
+| 5 | Input Sanitizer | CPU + conditional write | Respond ("I can only help with onboarding questions") |
+| 6 | Token Budget Guard | 2 DynamoDB reads | Respond ("Daily/monthly limit reached") |
+
+### Agent Orchestration
+
+Hybrid **Plan + ReAct + Tool Calling** architecture:
+
+- **Plan phase** — LLM creates personalized onboarding plan from intake answers
+- **Execute phase** — each step uses structured tool calls (search KB, send message, etc.)
+- **ReAct reasoning** — on unexpected input, LLM reasons explicitly before acting
+- **Incremental replanning** — only pending steps modified; completed steps frozen
+
+**Two-model split** minimizes cost:
+
+| Call Type | Model | Purpose |
+|---|---|---|
+| Reasoning | Amazon Nova Micro | "What should I do next?" |
+| Generation | Claude 3.5 Haiku | "Generate the response" |
+
+### Three-Layer Cost Protection
+
+```
+Layer 3: Workspace monthly cap ($5)     ← protects AWS bill
+  Layer 2: User daily cap (50 turns)    ← prevents one user hogging resources
+    Layer 1: Per-turn budget            ← prevents runaway agent loops
+
+  + AWS Budget ($10) + Kill Switch      ← nuclear option
+```
+
+## Tech Stack
+
+| Layer | Technology |
+|---|---|
+| Runtime | Python 3.12, AWS Lambda (arm64) |
+| Infrastructure | AWS SAM / CloudFormation, GitHub Actions CI/CD |
+| Queue | SQS FIFO (per-user ordering, event deduplication) |
+| State | DynamoDB (single-table design, TTL policies) |
+| LLM | Amazon Bedrock (Nova Micro + Claude Haiku) |
+| Vector Search | Pinecone (namespaces for multi-tenancy, hybrid search, reranking) |
+| Storage | S3 (versioned raw HTML archive) |
+| Secrets | AWS Secrets Manager (3 secrets) |
+| Monitoring | CloudWatch (logs, metrics, alarms), X-Ray tracing |
+| Slack | slack-sdk, Events API, Block Kit, OAuth2 |
+| Calendar | Google Calendar API, OAuth2 |
+| Testing | pytest, moto, TDD, 90%+ coverage gate |
+| Linting | ruff, mypy, pre-commit hooks |
+
+### Estimated Monthly Cost
+
+| Component | Cost |
+|---|---|
+| Lambda, API Gateway, SQS, DynamoDB, S3, CloudWatch, EventBridge, SNS | $0 (free tier) |
+| Bedrock (Nova Micro + Claude Haiku) | $0.05 - $2.00 |
+| Secrets Manager (3 secrets) | $1.20 |
+| Pinecone, Google Calendar API, Slack Platform | $0 (free tiers) |
+| **Total** | **$1 - $3/month** |
+
+Hard cap: $10/month via AWS Budgets + Kill Switch Lambda.
+
+## Project Structure
+
+```
+onboard-assist/
+├── src/
+│   ├── config/
+│   │   └── settings.py              # Pydantic Settings, env-based config
+│   ├── slack/
+│   │   ├── handler.py               # Slack Handler Lambda (events + commands + interactions)
+│   │   ├── oauth.py                 # Slack OAuth Lambda
+│   │   ├── models.py                # Frozen dataclasses (SlackEvent, SlackCommand, SQSMessage)
+│   │   ├── signature.py             # HMAC-SHA256 signature verification
+│   │   ├── client.py                # Slack API wrapper
+│   │   └── commands.py              # Slash command handlers
+│   ├── middleware/
+│   │   ├── inbound/                 # Pre-SQS: signature, filters, rate limiter, sanitizer, budget
+│   │   └── agent/                   # Per-LLM-call: output validator, tool validator, turn budget
+│   ├── agent/
+│   │   ├── worker.py                # Agent Worker Lambda
+│   │   ├── orchestrator.py          # Plan + ReAct + Tool Calling engine
+│   │   ├── planner.py               # Plan generation + incremental replanning
+│   │   ├── tools/                   # search_kb, send_message, assign_channel, calendar_event, manage_progress
+│   │   └── prompts/                 # System, planner, and responder prompts
+│   ├── rag/
+│   │   ├── pipeline.py              # Scrape → S3 → chunk → embed → Pinecone
+│   │   ├── vectorstore.py           # Pinecone client (namespaces, hybrid search, rerank)
+│   │   ├── chunker.py               # Document chunking with overlap
+│   │   ├── confidence.py            # 4-factor confidence scoring
+│   │   ├── scraper.py               # Web scraper (robots.txt compliant)
+│   │   └── storage.py               # S3 raw HTML + manifest storage
+│   ├── llm/
+│   │   ├── provider.py              # LLM provider interface
+│   │   ├── bedrock.py               # Bedrock provider (Nova Micro + Claude Haiku)
+│   │   ├── router.py                # Model router + cost tracking
+│   │   └── fallback.py              # Fallback chain
+│   ├── state/
+│   │   ├── dynamo.py                # DynamoDB single-table operations
+│   │   ├── models.py                # Frozen dataclasses (Plan, Steps, Usage, WorkspaceConfig)
+│   │   └── ttl.py                   # TTL policies (60s locks → 90d plans → permanent completions)
+│   ├── gcal/
+│   │   └── callback.py              # Google OAuth Callback Lambda
+│   └── admin/
+│       ├── kill_switch.py           # Kill Switch Lambda (SNS → disable API Gateway)
+│       ├── health_check.py          # Pinecone health check Lambda (daily cron)
+│       └── nudge.py                 # Inactivity nudge Lambda (daily cron)
+├── tests/
+│   ├── unit/                        # Per-module unit tests
+│   ├── integration/                 # Mocked AWS integration tests
+│   └── conftest.py                  # Shared fixtures
+├── infra/
+│   ├── template.yaml                # SAM template (all 46 AWS resources)
+│   └── policies/
+│       └── deploy-policy.json       # Least-privilege IAM for GitHub Actions OIDC
+├── .github/workflows/ci.yml         # Lint → test → coverage gate → SAM validate → deploy
+├── .pre-commit-config.yaml          # ruff, ruff-format, mypy, pytest, sam-validate
+├── samconfig.toml
+└── pyproject.toml
+```
+
+## DynamoDB Single-Table Design
+
+| pk | sk | Purpose | TTL |
+|---|---|---|---|
+| `WORKSPACE#{id}` | `CONFIG` | Workspace config (org name, bot token, channels) | — |
+| `WORKSPACE#{id}` | `PLAN#{user_id}` | Active onboarding plan + context | 90 days |
+| `WORKSPACE#{id}` | `COMPLETED#{user_id}` | Completion record (audit trail) | Never |
+| `WORKSPACE#{id}` | `USAGE#{user_id}#{date}` | Per-user daily usage | 7 days |
+| `WORKSPACE#{id}` | `USAGE#{yyyy-mm}` | Per-workspace monthly usage | 30 days |
+| `WORKSPACE#{id}` | `LOCK#{user_id}` | Processing lock | 60 seconds |
+| `WORKSPACE#{id}` | `OAUTH#GOOGLE#{user_id}` | Google Calendar tokens | 90 days |
+| `WORKSPACE#{id}` | `OAUTH#SLACK` | Slack bot token | — |
+| `SYSTEM` | `KILL_SWITCH` | Global kill switch flag | — |
+| `SECURITY` | `INJECTION#{ts}` | Injection attempt logs | 90 days |
+
+## Security
+
+- Slack signature verification (HMAC-SHA256) on every request
+- Prompt injection detection with regex patterns + strike counter (3 strikes → silent drop)
+- Output validation blocks system prompt leaks and persona breaks
+- Tool call validation (allowed names, param constraints, per-turn limits)
+- IAM least-privilege per Lambda function
+- Secrets in Secrets Manager (never in env vars or code)
+- DynamoDB encryption at rest
+- No VPC required — all external services use HTTPS + API key auth
+
+## Development
 
 ```bash
-# Create virtual environment
-python -m venv rag-env
-source rag-env/bin/activate  # On Windows: rag-env\Scripts\activate
-
 # Install
-pip install -e .
-```
-
-## ⚙️ Configuration
-
-### 1. Environment Setup
-
-Copy the example environment file and configure your settings:
-
-```bash
-cp .env.example .env
-```
-
-### 2. Complete .env Configuration
-
-```bash
-# Primary provider (choose your preferred AI provider)
-PRIMARY_LLM_PROVIDER=ollama             # ollama, openai, anthropic, google
-PRIMARY_EMBEDDING_PROVIDER=ollama       # ollama, openai, google
-
-# Ollama settings (for local use)
-OLLAMA_HOST=http://localhost:11434
-OLLAMA_LLM_MODEL=llama3.1
-OLLAMA_EMBEDDING_MODEL=nomic-embed-text
-
-# API Keys (required for cloud providers)
-OPENAI_API_KEY=your_openai_api_key_here
-ANTHROPIC_API_KEY=your_anthropic_api_key_here
-GEMINI_API_KEY=your_google_gemini_api_key_here
-
-# Model settings
-OPENAI_LLM_MODEL=gpt-4o-mini
-OPENAI_EMBEDDING_MODEL=text-embedding-3-small
-ANTHROPIC_LLM_MODEL=claude-3-7-sonnet-20250219
-GEMINI_LLM_MODEL=gemini-2.5-flash
-GEMINI_EMBEDDING_MODEL=gemini-embedding-001
-
-# RAG settings
-CHUNK_SIZE=1000
-CHUNK_OVERLAP=150
-MIN_CONFIDENCE=0.25
-MAX_CHUNKS=5
-
-# Paths
-DOCS_FOLDER=./docs
-CHROMA_DB_PATH=./chroma_db
-
-# Crawl settings (optional)
-CRAWL_SOURCES=""
-CRAWL_DEPTH=2
-CRAWL_MAX_PAGES=50
-```
-
-### 3. Provider-Specific Setup
-
-#### 🤖 Ollama (Local, Privacy-Focused)
-
-```bash
-# Install Ollama (macOS/Linux)
-curl -fsSL https://ollama.ai/install.sh | sh
-
-# Pull required models
-ollama pull llama3.1
-ollama pull nomic-embed-text
-
-# Verify Ollama is running
-ollama list
-```
-
-#### 🔑 OpenAI
-
-1. Get API key from [OpenAI Platform](https://platform.openai.com/api-keys)
-2. Add to your `.env` file:
-   ```bash
-   OPENAI_API_KEY=sk-...
-   PRIMARY_LLM_PROVIDER=openai
-   PRIMARY_EMBEDDING_PROVIDER=openai
-   ```
-
-#### 🧠 Google Gemini
-
-1. Get API key from [Google AI Studio](https://aistudio.google.com/app/apikey)
-2. Add to your `.env` file:
-   ```bash
-   GEMINI_API_KEY=AI...
-   PRIMARY_LLM_PROVIDER=google
-   PRIMARY_EMBEDDING_PROVIDER=google
-   ```
-
-#### 🎭 Anthropic Claude
-
-1. Get API key from [Anthropic Console](https://console.anthropic.com/)
-2. Add to your `.env` file:
-   ```bash
-   ANTHROPIC_API_KEY=sk-ant-...
-   PRIMARY_LLM_PROVIDER=anthropic
-   # Note: Anthropic doesn't provide embeddings, use openai or google for embeddings
-   PRIMARY_EMBEDDING_PROVIDER=openai
-   ```
-
-### 4. Interactive Configuration
-
-Use the built-in configuration tool:
-
-```bash
-rag-explorer configure
-```
-
-## 📖 Usage
-
-### Quick Start
-
-1. **Check system status**:
-   ```bash
-   rag-explorer status
-   ```
-
-2. **Test provider connectivity**:
-   ```bash
-   rag-explorer ping
-   ```
-
-3. **Index your documents**:
-   ```bash
-   rag-explorer index ./your-documents
-   ```
-
-4. **Ask questions**:
-   ```bash
-   rag-explorer ask "What is the main topic of these documents?"
-   ```
-
-### Core Commands
-
-#### 📂 Document Indexing
-```bash
-# Index documents from a directory
-rag-explorer index ./docs
-
-# The system will automatically:
-# - Process text files (.txt, .md)
-# - Extract text from PDFs
-# - Chunk documents optimally
-# - Generate embeddings
-# - Store in vector database
-```
-
-#### ❓ Question Answering
-```bash
-# Ask questions about your indexed documents
-rag-explorer ask "What are the key findings?"
-rag-explorer ask "Summarize the methodology"
-
-# The system provides:
-# - Relevant document excerpts
-# - Confidence scores
-# - Source references
-```
-
-#### 🔍 Document Search
-```bash
-# Search for specific topics
-rag-explorer search "machine learning"
-rag-explorer search "project timeline" --count 10
-
-# Returns ranked results with:
-# - Similarity scores
-# - Source documents
-# - Relevant snippets
-```
-
-#### 🌐 Website Crawling
-```bash
-# Add websites to crawl sources in .env
-CRAWL_SOURCES=https://example.com,https://blog.example.com
-
-# Crawl and index websites
-rag-explorer crawl
-```
-
-#### 📊 System Management
-```bash
-# Check system status and configuration
-rag-explorer status
-
-# Test AI provider connectivity
-rag-explorer ping
-
-# View storage metrics and database info
-rag-explorer metrics
-
-# Interactive configuration editor
-rag-explorer configure
-```
-
-### Example Workflow
-
-```bash
-# 1. Set up your environment
-cp .env.example .env
-# Edit .env with your API keys
-
-# 2. Test connectivity
-rag-explorer ping
-
-# 3. Index your documents
-rag-explorer index ./my-research-papers
-
-# 4. Check what was indexed
-rag-explorer metrics
-
-# 5. Start asking questions
-rag-explorer ask "What are the main conclusions?"
-rag-explorer ask "What methodology was used?"
-
-# 6. Search for specific topics
-rag-explorer search "neural networks"
-```
-
-## 🏗️ Architecture
-
-### High-Level Overview
-
-```
-┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
-│   Documents     │    │   AI Providers  │    │  Vector Store   │
-│  (.txt, .pdf)   │────│ OpenAI/Gemini   │────│   ChromaDB      │
-│                 │    │ Claude/Ollama   │    │                 │
-└─────────────────┘    └─────────────────┘    └─────────────────┘
-         │                       │                       │
-         └───────────────────────┼───────────────────────┘
-                                 │
-                    ┌─────────────────┐
-                    │  RAG Explorer   │
-                    │  CLI Interface  │
-                    └─────────────────┘
-```
-
-### Core Components
-
-#### 🧠 UnifiedRAGEngine
-- **Purpose**: Central orchestrator for the RAG pipeline
-- **Functions**: Question answering, document search, confidence calculation
-- **Features**: 4-factor confidence scoring, configurable result filtering
-
-#### 🔌 Provider System
-- **OpenAI Provider**: GPT models + text-embedding-3
-- **Google Provider**: Gemini models + embedding-001
-- **Anthropic Provider**: Claude models (LLM only)
-- **Ollama Provider**: Local models (llama3.1 + nomic-embed-text)
-
-#### 📄 Document Processing Pipeline
-- **Text Extraction**: Support for .txt, .md, .pdf files
-- **Smart Chunking**: Configurable chunk size with overlap
-- **Embedding Generation**: Provider-specific embedding creation
-- **Metadata Handling**: Source tracking and document organization
-
-#### 🗄️ Vector Database (ChromaDB)
-- **Storage**: Persistent local vector storage
-- **Search**: Semantic similarity search
-- **Management**: Collection management and indexing
-
-#### 🖥️ CLI Interface (Click + Rich)
-- **Commands**: 8 core commands for all operations
-- **UI**: Rich formatting with progress bars and tables
-- **Configuration**: Interactive environment management
-
-### Confidence Scoring Algorithm
-
-The system uses a 4-factor confidence score to rank results:
-
-1. **Similarity Score** (40%): Vector similarity between query and document
-2. **Result Count** (25%): Number of relevant chunks found
-3. **Keyword Overlap** (20%): Direct keyword matches
-4. **Content Length** (15%): Comprehensive content indicator
-
-```python
-confidence = (
-    similarity_score * 0.4 +
-    count_factor * 0.25 +
-    keyword_factor * 0.20 +
-    length_factor * 0.15
-)
-```
-
-## 🛠️ Tech Stack
-
-### Core Technologies
-- **Python 3.9+**: Primary language
-- **Click**: CLI framework for command-line interface
-- **Rich**: Terminal formatting and progress indicators
-- **ChromaDB**: Vector database for embeddings storage
-- **python-dotenv**: Environment variable management
-
-### AI Providers
-- **OpenAI**: `openai>=1.0.0` - GPT models and text embeddings
-- **Google Gemini**: `google-generativeai>=0.3.0` - Gemini models
-- **Anthropic**: `anthropic>=0.25.0` - Claude models
-- **Ollama**: `ollama>=0.3.0` - Local model serving
-
-### Document Processing
-- **BeautifulSoup4**: HTML parsing for web crawling
-- **lxml**: XML/HTML processing backend
-- **Built-in**: Text extraction and chunking
-
-### Development Tools
-- **pytest**: Testing framework
-- **black**: Code formatting
-- **isort**: Import sorting
-- **mypy**: Type checking
-
-## 📁 Supported File Types
-
-### Currently Supported
-- **Text Files**: `.txt`, `.md`
-- **PDF Documents**: `.pdf` (text extraction)
-
-### Future Roadmap
-- Microsoft Office documents (`.docx`, `.pptx`)
-- Web pages (direct URL indexing)
-- Jupyter notebooks (`.ipynb`)
-- Code files (`.py`, `.js`, etc.)
-
-## 🔧 Environment Variables Reference
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `PRIMARY_LLM_PROVIDER` | `ollama` | Main LLM provider (ollama, openai, anthropic, google) |
-| `PRIMARY_EMBEDDING_PROVIDER` | `ollama` | Embedding provider (ollama, openai, google) |
-| `OPENAI_API_KEY` | `""` | OpenAI API key |
-| `ANTHROPIC_API_KEY` | `""` | Anthropic API key |
-| `GEMINI_API_KEY` | `""` | Google Gemini API key |
-| `OLLAMA_HOST` | `http://localhost:11434` | Ollama server URL |
-| `OLLAMA_LLM_MODEL` | `llama3.1` | Ollama LLM model |
-| `OLLAMA_EMBEDDING_MODEL` | `nomic-embed-text` | Ollama embedding model |
-| `CHUNK_SIZE` | `1000` | Document chunk size in characters |
-| `CHUNK_OVERLAP` | `150` | Overlap between chunks |
-| `MIN_CONFIDENCE` | `0.25` | Minimum confidence threshold |
-| `MAX_CHUNKS` | `5` | Maximum chunks to retrieve |
-| `DOCS_FOLDER` | `./docs` | Default documents directory |
-| `CHROMA_DB_PATH` | `./chroma_db` | Vector database storage path |
-| `CRAWL_SOURCES` | `""` | Comma-separated URLs to crawl |
-| `CRAWL_DEPTH` | `2` | Maximum crawl depth |
-| `CRAWL_MAX_PAGES` | `50` | Maximum pages to crawl |
-
-## 🔧 Troubleshooting
-
-### Common Issues
-
-#### Provider Connection Errors
-```bash
-# Test provider connectivity
-rag-explorer ping
-
-# Check configuration
-rag-explorer status
-
-# Common fixes:
-# 1. Verify API keys in .env file
-# 2. Check internet connection
-# 3. Validate provider URLs (for Ollama)
-```
-
-#### No Results Found
-```bash
-# Check if documents are indexed
-rag-explorer metrics
-
-# Re-index documents if needed
-rag-explorer index ./docs
-
-# Adjust confidence threshold
-# In .env: MIN_CONFIDENCE=0.1
-```
-
-#### Ollama Issues
-```bash
-# Check if Ollama is running
-ollama list
-
-# Start Ollama service
-ollama serve
-
-# Pull required models
-ollama pull llama3.1
-ollama pull nomic-embed-text
-```
-
-#### Database Issues
-```bash
-# Check database status
-rag-explorer status
-
-# Reset database if corrupted
-rm -rf ./chroma_db
-rag-explorer index ./docs  # Re-index
-```
-
-### Debug Mode
-
-Set environment variable for detailed logging:
-```bash
-export RAG_DEBUG=true
-rag-explorer ask "your question"
-```
-
-## 🔄 Development
-
-### Project Structure
-```
-rag-explorer/
-├── src/rag_explorer/
-│   ├── cli/              # CLI commands and interface
-│   ├── core/             # Core RAG logic and providers
-│   ├── engine/           # Unified RAG engine
-│   └── utils/            # Utilities and settings
-├── tests/                # Test suite
-├── docs/                 # Example documents
-└── pyproject.toml        # Project configuration
-```
-
-### Running Tests
-```bash
-# Install development dependencies
 pip install -e ".[dev]"
 
-# Run tests
+# Run tests (TDD, 90%+ coverage enforced)
 pytest
 
-# Run with coverage
-pytest --cov=src/rag_explorer
-```
-
-### Code Formatting
-```bash
-# Format code
-black src/
-
-# Sort imports
-isort src/
-
-# Type checking
+# Lint + format + type check
+ruff check src/ tests/
+ruff format --check src/ tests/
 mypy src/
+
+# Pre-commit (runs all of the above + sam validate)
+pre-commit run --all-files
+
+# SAM build + validate
+sam build
+sam validate --template infra/template.yaml --lint
+
+# Deploy (requires AWS credentials with deploy-policy.json)
+sam deploy
 ```
 
-## 📄 License & Credits
+## CI/CD
 
-### License
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+GitHub Actions pipeline on every push/PR to `main`:
 
-### Author
-**Aditya Mittal** - [theadityamittal@gmail.com](mailto:theadityamittal@gmail.com)
+1. **Lint** — ruff check + ruff format + mypy
+2. **Test** — pytest with 90% coverage gate
+3. **SAM Validate** — template linting
+4. **Deploy** — SAM deploy via OIDC (gated by `DEPLOY_ENABLED` variable)
 
-### Acknowledgments
-- OpenAI for GPT models and embeddings API
-- Google for Gemini models and embedding services
-- Anthropic for Claude models
-- Ollama community for local model serving
-- ChromaDB team for the vector database
-- Click and Rich libraries for CLI interface
+## Author
 
----
+**Aditya Mittal** — [theadityamittal@gmail.com](mailto:theadityamittal@gmail.com)
 
-**Made with ❤️ for personal knowledge exploration**
+## License
 
-For issues and feature requests, please visit: [GitHub Issues](https://github.com/theadityamittal/rag-explorer/issues)
+MIT
