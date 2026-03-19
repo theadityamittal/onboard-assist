@@ -21,19 +21,19 @@ class TestAgentPipeline:
                 text='{"action": "tool_call", "tool": "search_kb", "params": {"query": "events"}}',
                 input_tokens=100,
                 output_tokens=60,
-                model_id="nova",
+                model_id="gemini-2.5-flash-lite",
             ),
             LLMResponse(
                 text='{"action": "respond"}',
                 input_tokens=200,
                 output_tokens=30,
-                model_id="nova",
+                model_id="gemini-2.5-flash-lite",
             ),
             LLMResponse(
                 text="The events team organizes community fundraisers and galas.",
                 input_tokens=300,
                 output_tokens=40,
-                model_id="haiku",
+                model_id="gemini-2.5-flash",
             ),
         ]
 
@@ -91,13 +91,13 @@ class TestAgentPipeline:
                 text='{"action": "respond", "reasoning": "New user, need to ask role"}',
                 input_tokens=100,
                 output_tokens=40,
-                model_id="nova",
+                model_id="gemini-2.5-flash-lite",
             ),
             LLMResponse(
                 text="Welcome to Changing the Present! What team are you joining?",
                 input_tokens=150,
                 output_tokens=25,
-                model_id="haiku",
+                model_id="gemini-2.5-flash",
             ),
         ]
 

@@ -36,13 +36,13 @@ class TestOrchestrator:
                 text='{"action": "respond", "reasoning": "User said hi, just greet them"}',
                 input_tokens=100,
                 output_tokens=50,
-                model_id="nova-micro",
+                model_id="gemini-2.5-flash-lite",
             ),
             LLMResponse(
                 text="Hi Jane! How can I help you today?",
                 input_tokens=200,
                 output_tokens=30,
-                model_id="haiku",
+                model_id="gemini-2.5-flash",
             ),
         ]
 
@@ -71,19 +71,19 @@ class TestOrchestrator:
                 text='{"action": "tool_call", "tool": "search_kb", "params": {"query": "events team"}}',
                 input_tokens=100,
                 output_tokens=60,
-                model_id="nova-micro",
+                model_id="gemini-2.5-flash-lite",
             ),
             LLMResponse(
                 text='{"action": "respond", "reasoning": "Got KB results, ready to answer"}',
                 input_tokens=200,
                 output_tokens=40,
-                model_id="nova-micro",
+                model_id="gemini-2.5-flash-lite",
             ),
             LLMResponse(
                 text="The events team handles fundraising galas and community events.",
                 input_tokens=300,
                 output_tokens=50,
-                model_id="haiku",
+                model_id="gemini-2.5-flash",
             ),
         ]
 
@@ -118,13 +118,13 @@ class TestOrchestrator:
                 text='{"action": "respond", "reasoning": "New user, ask about role"}',
                 input_tokens=100,
                 output_tokens=40,
-                model_id="nova-micro",
+                model_id="gemini-2.5-flash-lite",
             ),
             LLMResponse(
                 text="Welcome! What team or role will you be helping with?",
                 input_tokens=200,
                 output_tokens=30,
-                model_id="haiku",
+                model_id="gemini-2.5-flash",
             ),
         ]
 
