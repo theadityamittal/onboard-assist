@@ -34,7 +34,7 @@ class GeminiProvider(LLMProvider):
         """
         response = self._client.chat.completions.create(
             model=model_id,
-            messages=messages,
+            messages=messages,  # type: ignore[arg-type]
             max_tokens=max_tokens,
         )
 
@@ -43,7 +43,7 @@ class GeminiProvider(LLMProvider):
 
         return LLMResponse(
             text=choice.message.content or "",
-            input_tokens=usage.prompt_tokens,
-            output_tokens=usage.completion_tokens,
+            input_tokens=usage.prompt_tokens if usage else 0,
+            output_tokens=usage.completion_tokens if usage else 0,
             model_id=model_id,
         )
