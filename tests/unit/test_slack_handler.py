@@ -73,6 +73,7 @@ class TestSlackHandlerLambda:
         event = _make_api_gw_event(path="/slack/events", body=_EVENT_BODY)
         result = lambda_handler(event, {})
         assert result["statusCode"] == 200
+        mock_gating.assert_called_once()
         mock_enqueue.assert_called_once()
 
     @patch("slack.handler._get_signing_secret")
@@ -94,6 +95,7 @@ class TestSlackHandlerLambda:
         event = _make_api_gw_event(path="/slack/events", body=_EVENT_BODY)
         result = lambda_handler(event, {})
         assert result["statusCode"] == 200
+        mock_gating.assert_called_once()
         mock_ephemeral.assert_called_once_with(
             workspace_id="W456",
             channel_id="C789",
@@ -120,6 +122,7 @@ class TestSlackHandlerLambda:
         event = _make_api_gw_event(path="/slack/events", body=_EVENT_BODY)
         result = lambda_handler(event, {})
         assert result["statusCode"] == 200
+        mock_gating.assert_called_once()
         mock_ephemeral.assert_not_called()
 
     @patch("slack.handler._get_signing_secret")
@@ -187,6 +190,8 @@ class TestSlackHandlerLambda:
         }
         result = lambda_handler(event, {})
         assert result["statusCode"] == 200
+        mock_chain.run.assert_called_once()
+        mock_enqueue.assert_called_once()
 
 
 class TestBuildMiddlewareChain:
@@ -233,6 +238,8 @@ class TestSendEphemeralRejection:
             user_id="U1",
             text="Rate limited",
         )
+        mock_wc_cls.assert_called_once_with(token="xoxb-test")
+        mock_sc_cls.assert_called_once_with(web_client=mock_wc_cls.return_value)
         mock_slack_client.send_ephemeral.assert_called_once_with(
             channel="C1", user="U1", text="Rate limited"
         )
@@ -276,6 +283,8 @@ class TestSendEphemeralRejection:
             user_id="U1",
             text="Rate limited",
         )
+        mock_wc_cls.assert_called_once_with(token="xoxb-test")
+        mock_sc_cls.assert_called_once_with(web_client=mock_wc_cls.return_value)
 
 
 # ---------------------------------------------------------------------------
