@@ -21,9 +21,11 @@ from typing import Any
 from urllib.parse import parse_qs
 
 import boto3
+from slack.client import SlackClient
 from slack.commands import handle_command
 from slack.models import SlackCommand, SlackEvent, SQSMessage
 from slack.signature import InvalidSignatureError, verify_slack_signature
+from slack_sdk import WebClient
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -223,14 +225,8 @@ def _send_ephemeral_rejection(
         )
         return
     try:
-        from slack_sdk import WebClient
-
-        client = WebClient(token=config.bot_token)
-        client.chat_postEphemeral(
-            channel=channel_id,
-            user=user_id,
-            text=text,
-        )
+        slack_client = SlackClient(web_client=WebClient(token=config.bot_token))
+        slack_client.send_ephemeral(channel=channel_id, user=user_id, text=text)
     except Exception:
         logger.exception("Failed to send ephemeral rejection")
 

@@ -8,6 +8,8 @@ import os
 from typing import Any
 
 import boto3
+from slack.client import SlackClient
+from slack_sdk import WebClient
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -64,12 +66,15 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
             bot_token = _get_bot_token(workspace_id)
             logger.debug("Bot token retrieved (length=%d)", len(bot_token))
 
+            slack_client = SlackClient(web_client=WebClient(token=bot_token))
+            logger.debug("SlackClient created")
+
             logger.debug("Creating orchestrator")
             orchestrator = _create_orchestrator(
                 workspace_id=workspace_id,
                 user_id=user_id,
                 channel_id=channel_id,
-                bot_token=bot_token,
+                slack_client=slack_client,
             )
             logger.debug("Orchestrator created successfully")
 
@@ -83,11 +88,7 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
                 )
 
                 logger.debug("Sending Slack message to channel=%s", channel_id)
-                _send_slack_message(
-                    bot_token=bot_token,
-                    channel_id=channel_id,
-                    text=response_text,
-                )
+                slack_client.send_message(channel=channel_id, text=response_text)
 
                 logger.info("Response sent to %s/%s", workspace_id, user_id)
             finally:
@@ -142,7 +143,11 @@ def _get_bot_token(workspace_id: str) -> str:
 
 
 def _create_orchestrator(
-    *, workspace_id: str, user_id: str, channel_id: str, bot_token: str
+    *,
+    workspace_id: str,
+    user_id: str,
+    channel_id: str,
+    slack_client: SlackClient,
 ) -> Any:
     """Wire up the orchestrator with all dependencies."""
     logger.debug("_create_orchestrator: importing dependencies")
@@ -157,8 +162,6 @@ def _create_orchestrator(
     from llm.router import LLMRouter
     from middleware.agent.turn_budget import TurnBudgetEnforcer
     from rag.vectorstore import PineconeVectorStore
-    from slack.client import SlackClient
-    from slack_sdk import WebClient
     from state.dynamo import DynamoStateStore
 
     logger.debug("_create_orchestrator: imports complete, loading settings")
@@ -187,9 +190,7 @@ def _create_orchestrator(
         settings.generation_model_id,
     )
 
-    web_client = WebClient(token=bot_token)
-    slack_client = SlackClient(web_client=web_client)
-    logger.debug("_create_orchestrator: Slack client ready")
+    logger.debug("_create_orchestrator: Slack client received")
 
     pinecone_key = secrets["pinecone_api_key"]
     logger.debug(
@@ -206,7 +207,7 @@ def _create_orchestrator(
         "send_message": SendMessageTool(
             slack_client=slack_client, channel_id=channel_id
         ),
-        "assign_channel": AssignChannelTool(web_client=web_client, user_id=user_id),
+        "assign_channel": AssignChannelTool(slack_client=slack_client, user_id=user_id),
         "calendar_event": CalendarEventTool(),
         "manage_progress": ManageProgressTool(
             state_store=state_store,
@@ -236,17 +237,3 @@ def _create_orchestrator(
         channel_id=channel_id,
         budget=budget,
     )
-
-
-def _send_slack_message(*, bot_token: str, channel_id: str, text: str) -> None:
-    """Send a message via Slack API."""
-    from slack_sdk import WebClient
-
-    logger.debug(
-        "_send_slack_message: posting to channel=%s, text_length=%d",
-        channel_id,
-        len(text),
-    )
-    client = WebClient(token=bot_token)
-    result = client.chat_postMessage(channel=channel_id, text=text)
-    logger.debug("_send_slack_message: Slack API response ok=%s", result.get("ok"))
