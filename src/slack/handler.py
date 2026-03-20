@@ -109,7 +109,7 @@ def _handle_event(body_str: str) -> dict[str, Any]:
     )
 
     # Run middleware chain
-    chain = _build_middleware_chain()
+    chain = _build_middleware_chain(workspace_id=slack_event.workspace_id)
     result = chain.run(slack_event)
     logger.debug(
         "Middleware result: allowed=%s, reason=%s", result.allowed, result.reason
@@ -121,6 +121,13 @@ def _handle_event(body_str: str) -> dict[str, Any]:
             slack_event.event_id,
             result.reason,
         )
+        if result.should_respond and result.reason and slack_event.channel_id:
+            _send_ephemeral_rejection(
+                workspace_id=slack_event.workspace_id,
+                channel_id=slack_event.channel_id,
+                user_id=slack_event.user_id,
+                text=result.reason,
+            )
         return _json_response(200, {"ok": True})
 
     # Enqueue to SQS
@@ -165,12 +172,14 @@ def _handle_interaction(body_str: str) -> dict[str, Any]:
     return _json_response(200, {"ok": True})
 
 
-def _build_middleware_chain() -> Any:
+def _build_middleware_chain(*, workspace_id: str) -> Any:
     """Build the inbound middleware chain with real dependencies."""
     from middleware.inbound.chain import InboundMiddlewareChain
 
     state_store = _get_state_store()
-    return InboundMiddlewareChain(state_store=state_store)
+    config = state_store.get_workspace_config(workspace_id=workspace_id)
+    bot_user_id = config.bot_user_id if config else ""
+    return InboundMiddlewareChain(state_store=state_store, bot_user_id=bot_user_id)
 
 
 def _get_state_store() -> Any:
@@ -196,6 +205,34 @@ def _get_signing_secret() -> str:
         return str(secret_data.get("signing_secret", secret_str))
     except json.JSONDecodeError:
         return secret_str
+
+
+def _send_ephemeral_rejection(
+    *,
+    workspace_id: str,
+    channel_id: str,
+    user_id: str,
+    text: str,
+) -> None:
+    """Send an ephemeral rejection message to the user."""
+    state_store = _get_state_store()
+    config = state_store.get_workspace_config(workspace_id=workspace_id)
+    if not config or not config.bot_token:
+        logger.warning(
+            "No bot_token for workspace %s, skipping ephemeral", workspace_id
+        )
+        return
+    try:
+        from slack_sdk import WebClient
+
+        client = WebClient(token=config.bot_token)
+        client.chat_postEphemeral(
+            channel=channel_id,
+            user=user_id,
+            text=text,
+        )
+    except Exception:
+        logger.exception("Failed to send ephemeral rejection")
 
 
 def _enqueue_to_sqs(msg: SQSMessage) -> None:

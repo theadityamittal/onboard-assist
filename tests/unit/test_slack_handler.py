@@ -8,6 +8,20 @@ from unittest.mock import MagicMock, patch
 
 from slack.handler import lambda_handler
 
+_EVENT_BODY = {
+    "type": "event_callback",
+    "event": {
+        "type": "message",
+        "user": "U123",
+        "channel": "C789",
+        "text": "Hello",
+        "ts": "123.456",
+        "event_ts": "123.456",
+    },
+    "event_id": "Ev001",
+    "team_id": "W456",
+}
+
 
 def _make_api_gw_event(
     path: str,
@@ -50,57 +64,55 @@ class TestSlackHandlerLambda:
         mock_chain.run.return_value = MagicMock(allowed=True)
         mock_chain_builder.return_value = mock_chain
 
-        event = _make_api_gw_event(
-            path="/slack/events",
-            body={
-                "type": "event_callback",
-                "event": {
-                    "type": "message",
-                    "user": "U123",
-                    "channel": "C789",
-                    "text": "Hello",
-                    "ts": "123.456",
-                    "event_ts": "123.456",
-                },
-                "event_id": "Ev001",
-                "team_id": "W456",
-            },
-        )
+        event = _make_api_gw_event(path="/slack/events", body=_EVENT_BODY)
         result = lambda_handler(event, {})
         assert result["statusCode"] == 200
         mock_enqueue.assert_called_once()
 
     @patch("slack.handler._get_signing_secret")
     @patch("slack.handler.verify_slack_signature")
+    @patch("slack.handler._send_ephemeral_rejection")
     @patch("slack.handler._build_middleware_chain")
-    def test_event_blocked_by_middleware(
-        self, mock_chain_builder, mock_verify, mock_secret
+    def test_reject_sends_ephemeral(
+        self, mock_chain_builder, mock_ephemeral, mock_verify, mock_secret
     ):
+        """When middleware rejects with should_respond=True, send ephemeral."""
         mock_secret.return_value = "secret"
         mock_chain = MagicMock()
         mock_chain.run.return_value = MagicMock(
-            allowed=False, should_respond=True, reason="Rate limited"
+            allowed=False, should_respond=True, reason="Still working..."
         )
         mock_chain_builder.return_value = mock_chain
 
-        event = _make_api_gw_event(
-            path="/slack/events",
-            body={
-                "type": "event_callback",
-                "event": {
-                    "type": "message",
-                    "user": "U123",
-                    "channel": "C789",
-                    "text": "Hello",
-                    "ts": "123.456",
-                    "event_ts": "123.456",
-                },
-                "event_id": "Ev001",
-                "team_id": "W456",
-            },
-        )
+        event = _make_api_gw_event(path="/slack/events", body=_EVENT_BODY)
         result = lambda_handler(event, {})
         assert result["statusCode"] == 200
+        mock_ephemeral.assert_called_once_with(
+            workspace_id="W456",
+            channel_id="C789",
+            user_id="U123",
+            text="Still working...",
+        )
+
+    @patch("slack.handler._get_signing_secret")
+    @patch("slack.handler.verify_slack_signature")
+    @patch("slack.handler._send_ephemeral_rejection")
+    @patch("slack.handler._build_middleware_chain")
+    def test_drop_does_not_send_ephemeral(
+        self, mock_chain_builder, mock_ephemeral, mock_verify, mock_secret
+    ):
+        """When middleware drops (should_respond=False), no ephemeral sent."""
+        mock_secret.return_value = "secret"
+        mock_chain = MagicMock()
+        mock_chain.run.return_value = MagicMock(
+            allowed=False, should_respond=False, reason=None
+        )
+        mock_chain_builder.return_value = mock_chain
+
+        event = _make_api_gw_event(path="/slack/events", body=_EVENT_BODY)
+        result = lambda_handler(event, {})
+        assert result["statusCode"] == 200
+        mock_ephemeral.assert_not_called()
 
     @patch("slack.handler._get_signing_secret")
     @patch("slack.handler.verify_slack_signature")
