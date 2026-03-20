@@ -167,10 +167,85 @@ def _handle_slash_command(body_str: str) -> dict[str, Any]:
 
 
 def _handle_interaction(body_str: str) -> dict[str, Any]:
-    """Handle interactive component callbacks (buttons, modals).
+    """Handle Block Kit interaction callbacks (buttons, modals).
 
-    Stub for Phase 2 — will be implemented when agent brain is added.
+    The body is form-encoded with a single `payload` field containing JSON.
     """
+    try:
+        parsed = parse_qs(body_str)
+        if "payload" not in parsed:
+            logger.warning("Interaction body missing 'payload' field")
+            return _json_response(400, {"error": "Missing payload"})
+        payload = json.loads(parsed["payload"][0])
+    except (KeyError, json.JSONDecodeError, ValueError) as e:
+        logger.warning("Failed to parse interaction payload: %s", e)
+        return _json_response(400, {"error": "Invalid payload"})
+
+    payload_type = payload.get("type", "")
+    if payload_type != "block_actions":
+        logger.warning("Unsupported interaction type: %s", payload_type)
+        return _json_response(400, {"error": f"Unsupported type: {payload_type}"})
+
+    user_id = payload.get("user", {}).get("id", "")
+    team_id = payload.get("team", {}).get("id", "")
+    channel_id = payload.get("channel", {}).get("id", "")
+    message_ts = payload.get("message", {}).get("ts", "")
+
+    actions = payload.get("actions", [])
+    first_action = actions[0] if actions else {}
+    action_id = first_action.get("action_id", "")
+    action_value = first_action.get("value", "")
+
+    # Build a synthetic SlackEvent so middleware can run (ConcurrencyGuard,
+    # BotFilter, TokenBudgetGuard).  EmptyFilter and InputSanitizer are
+    # skipped because INTERACTION is not TEAM_JOIN but also has no text body
+    # — we handle that by passing an empty string and relying on the chain
+    # skipping those steps via the INTERACTION type.
+    from slack.models import EventType, SlackEvent
+
+    slack_event = SlackEvent(
+        event_id=f"interaction:{team_id}:{user_id}:{message_ts}",
+        workspace_id=team_id,
+        user_id=user_id,
+        channel_id=channel_id,
+        text="",
+        event_type=EventType.INTERACTION,
+        timestamp=message_ts,
+        is_bot=False,
+    )
+
+    chain = _build_middleware_chain(workspace_id=team_id)
+    result = chain.run(slack_event)
+    logger.debug(
+        "Interaction middleware result: allowed=%s, reason=%s",
+        result.allowed,
+        result.reason,
+    )
+
+    if not result.allowed:
+        logger.info(
+            "Interaction blocked by middleware: %s (reason: %s)",
+            slack_event.event_id,
+            result.reason,
+        )
+        return _json_response(200, {"ok": True})
+
+    sqs_msg = SQSMessage(
+        version="1.0",
+        event_id=slack_event.event_id,
+        workspace_id=team_id,
+        user_id=user_id,
+        channel_id=channel_id,
+        event_type=EventType.INTERACTION,
+        text="",
+        timestamp=message_ts,
+        is_dm=channel_id.startswith("D"),
+        action_id=action_id,
+        action_value=action_value,
+    )
+    logger.debug("Interaction SQS message: %s", json.dumps(sqs_msg.to_dict())[:300])
+    _enqueue_to_sqs(sqs_msg)
+
     return _json_response(200, {"ok": True})
 
 

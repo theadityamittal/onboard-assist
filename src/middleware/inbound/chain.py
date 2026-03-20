@@ -64,8 +64,9 @@ class InboundMiddlewareChain:
         if not result.allowed:
             return result
 
-        # Text-content filters (skip for non-text events like TEAM_JOIN)
-        if event.event_type != EventType.TEAM_JOIN:
+        # Text-content filters (skip for non-text events like TEAM_JOIN or INTERACTION)
+        _skip_text_filters = {EventType.TEAM_JOIN, EventType.INTERACTION}
+        if event.event_type not in _skip_text_filters:
             # 3. EmptyFilter (CPU only)
             result = EmptyFilter.check(event)
             if not result.allowed:
@@ -76,8 +77,8 @@ class InboundMiddlewareChain:
         if not result.allowed:
             return result
 
-        # Text-content sanitization (skip for TEAM_JOIN)
-        if event.event_type != EventType.TEAM_JOIN:
+        # Text-content sanitization (skip for TEAM_JOIN or INTERACTION)
+        if event.event_type not in _skip_text_filters:
             # 5. InputSanitizer (CPU + conditional DynamoDB write)
             result = self._sanitizer.check(event)
             if not result.allowed:

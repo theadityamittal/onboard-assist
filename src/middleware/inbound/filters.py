@@ -8,7 +8,12 @@ from __future__ import annotations
 
 from slack.models import EventType, MiddlewareResult, SlackEvent
 
-_ALLOWED_EVENT_TYPES = {EventType.MESSAGE, EventType.APP_MENTION, EventType.TEAM_JOIN}
+_ALLOWED_EVENT_TYPES = {
+    EventType.MESSAGE,
+    EventType.APP_MENTION,
+    EventType.TEAM_JOIN,
+    EventType.INTERACTION,
+}
 _ALLOWED_SUBTYPES: set[str | None] = {None}
 
 

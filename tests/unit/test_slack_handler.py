@@ -152,11 +152,35 @@ class TestSlackHandlerLambda:
 
     @patch("slack.handler._get_signing_secret")
     @patch("slack.handler.verify_slack_signature")
-    def test_interaction_path_returns_200(self, mock_verify, mock_secret):
+    @patch("slack.handler._enqueue_to_sqs")
+    @patch("slack.handler._build_middleware_chain")
+    def test_interaction_path_returns_200(
+        self, mock_chain_builder, mock_enqueue, mock_verify, mock_secret
+    ):
+        import json as _json
+        from urllib.parse import urlencode
+
         mock_secret.return_value = "secret"
-        event = _make_api_gw_event(
-            path="/slack/interactions", body={"type": "block_actions"}
-        )
+        mock_chain = MagicMock()
+        mock_chain.run.return_value = MagicMock(allowed=True)
+        mock_chain_builder.return_value = mock_chain
+
+        payload = {
+            "type": "block_actions",
+            "user": {"id": "U1"},
+            "team": {"id": "T1"},
+            "channel": {"id": "C1"},
+            "message": {"ts": "1.0"},
+            "actions": [{"action_id": "btn", "value": "ok"}],
+        }
+        body = urlencode({"payload": _json.dumps(payload)})
+        event = {
+            "path": "/slack/interactions",
+            "httpMethod": "POST",
+            "headers": {},
+            "body": body,
+            "requestContext": {},
+        }
         result = lambda_handler(event, {})
         assert result["statusCode"] == 200
 
