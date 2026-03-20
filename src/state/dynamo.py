@@ -300,6 +300,35 @@ class DynamoStateStore:
             UpdateExpression="REMOVE bot_token",
         )
 
+    def get_bot_token(self, *, workspace_id: str, encryptor: FieldEncryptor) -> str:
+        """Get bot_token: SECRETS record first, fallback to WorkspaceConfig + migrate.
+
+        Priority:
+        1. DynamoDB SECRETS record (KMS-encrypted) — set during OAuth
+        2. WorkspaceConfig plaintext bot_token — legacy; migrated to SECRETS on first read
+
+        Raises:
+            ValueError: If no bot_token is found in either location.
+        """
+        # 1. Try SECRETS record first
+        secrets = self.get_workspace_secrets(
+            workspace_id=workspace_id, encryptor=encryptor
+        )
+        if secrets and secrets.get("bot_token"):
+            return str(secrets["bot_token"])
+
+        # 2. Fall back to WorkspaceConfig plaintext
+        config = self.get_workspace_config(workspace_id=workspace_id)
+        if config and config.bot_token:
+            # Lazy migration: move token to SECRETS and remove from CONFIG
+            self.migrate_bot_token_to_secrets(
+                workspace_id=workspace_id, encryptor=encryptor
+            )
+            return str(config.bot_token)
+
+        msg = f"No bot_token found for workspace {workspace_id}"
+        raise ValueError(msg)
+
     def save_setup_state(self, *, setup_state: SetupState) -> None:
         """Save or update admin setup state with 7-day TTL."""
         self._table.put_item(

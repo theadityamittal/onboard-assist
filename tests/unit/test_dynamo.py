@@ -4,6 +4,7 @@ import json
 import time
 from unittest.mock import MagicMock
 
+import pytest
 from botocore.exceptions import ClientError
 from state.dynamo import DynamoStateStore
 from state.models import (
@@ -296,6 +297,138 @@ class TestSecretsRecord:
         update_call = update_calls[0][1]
         assert update_call["Key"] == {"pk": "WORKSPACE#W1", "sk": "CONFIG"}
         assert "bot_token" in update_call["UpdateExpression"]
+
+
+class TestGetBotToken:
+    """Tests for DynamoStateStore.get_bot_token unified retrieval with lazy migration."""
+
+    def _make_store(self, mock_table=None):
+        table = mock_table or MagicMock()
+        return DynamoStateStore(table=table)
+
+    def _make_encryptor(self, encrypt_return="ENCRYPTED", decrypt_return=None):
+        enc = MagicMock()
+        enc.encrypt.return_value = encrypt_return
+        if decrypt_return is not None:
+            enc.decrypt.return_value = decrypt_return
+        return enc
+
+    def _secrets_item(self, token: str) -> dict:
+        return {
+            "pk": "WORKSPACE#W1",
+            "sk": "SECRETS",
+            "encrypted_data": "ENCRYPTED_BLOB",
+            "ttl": 9999999999,
+        }
+
+    def _config_item(self, token: str | None) -> dict:
+        item: dict = {
+            "pk": "WORKSPACE#W1",
+            "sk": "CONFIG",
+            "workspace_id": "W1",
+            "team_name": "Acme",
+            "bot_user_id": "U_BOT",
+            "active": True,
+            "updated_at": 1000,
+        }
+        if token is not None:
+            item["bot_token"] = token
+        return item
+
+    def test_get_bot_token_reads_from_secrets_first(self):
+        """If SECRETS record exists with bot_token, return it without touching CONFIG."""
+        mock_table = MagicMock()
+        secrets_payload = json.dumps({"bot_token": "xoxb-from-secrets"})
+        # get_item always returns SECRETS record
+        mock_table.get_item.return_value = {
+            "Item": self._secrets_item("xoxb-from-secrets")
+        }
+        enc = self._make_encryptor(decrypt_return=secrets_payload)
+
+        store = self._make_store(mock_table)
+        token = store.get_bot_token(workspace_id="W1", encryptor=enc)
+
+        assert token == "xoxb-from-secrets"
+        # CONFIG should NOT be read (only 1 get_item call for SECRETS)
+        assert mock_table.get_item.call_count == 1
+        enc.decrypt.assert_called_once()
+
+    def test_get_bot_token_falls_back_to_config(self):
+        """If SECRETS record has no bot_token, read from WorkspaceConfig plaintext."""
+        mock_table = MagicMock()
+
+        def side_effect(**kwargs):
+            key = kwargs.get("Key", {})
+            if key.get("sk") == "SECRETS":
+                return {}  # not found
+            return {"Item": self._config_item("xoxb-from-config")}
+
+        mock_table.get_item.side_effect = side_effect
+        enc = self._make_encryptor()
+
+        store = self._make_store(mock_table)
+        token = store.get_bot_token(workspace_id="W1", encryptor=enc)
+
+        assert token == "xoxb-from-config"
+        enc.decrypt.assert_not_called()
+
+    def test_get_bot_token_migrates_from_config_to_secrets(self):
+        """When falling back to CONFIG, migrate bot_token to SECRETS and remove from CONFIG."""
+        mock_table = MagicMock()
+
+        def side_effect(**kwargs):
+            key = kwargs.get("Key", {})
+            if key.get("sk") == "SECRETS":
+                return {}  # not found
+            return {"Item": self._config_item("xoxb-to-migrate")}
+
+        mock_table.get_item.side_effect = side_effect
+        enc = self._make_encryptor(encrypt_return="ENCRYPTED_TOKEN")
+
+        store = self._make_store(mock_table)
+        token = store.get_bot_token(workspace_id="W1", encryptor=enc)
+
+        assert token == "xoxb-to-migrate"
+
+        # Verify migration: SECRETS record was written
+        put_calls = mock_table.put_item.call_args_list
+        secrets_puts = [c for c in put_calls if c[1]["Item"].get("sk") == "SECRETS"]
+        assert len(secrets_puts) == 1
+        assert secrets_puts[0][1]["Item"]["encrypted_data"] == "ENCRYPTED_TOKEN"
+
+        # Verify migration: bot_token removed from CONFIG
+        update_calls = mock_table.update_item.call_args_list
+        assert len(update_calls) == 1
+        update_call = update_calls[0][1]
+        assert update_call["Key"] == {"pk": "WORKSPACE#W1", "sk": "CONFIG"}
+        assert "bot_token" in update_call["UpdateExpression"]
+
+    def test_get_bot_token_works_when_already_migrated(self):
+        """SECRETS record with bot_token — no migration triggered."""
+        mock_table = MagicMock()
+        secrets_payload = json.dumps({"bot_token": "xoxb-already-migrated"})
+        mock_table.get_item.return_value = {
+            "Item": self._secrets_item("xoxb-already-migrated")
+        }
+        enc = self._make_encryptor(decrypt_return=secrets_payload)
+
+        store = self._make_store(mock_table)
+        token = store.get_bot_token(workspace_id="W1", encryptor=enc)
+
+        assert token == "xoxb-already-migrated"
+        # No migration: no put_item or update_item calls
+        mock_table.put_item.assert_not_called()
+        mock_table.update_item.assert_not_called()
+
+    def test_get_bot_token_raises_when_not_found(self):
+        """Raises ValueError when neither SECRETS nor CONFIG has a bot_token."""
+        mock_table = MagicMock()
+        mock_table.get_item.return_value = {}  # all lookups return nothing
+        enc = self._make_encryptor()
+
+        store = self._make_store(mock_table)
+        with pytest.raises(ValueError, match="No bot_token found"):
+            store.get_bot_token(workspace_id="W_MISSING", encryptor=enc)
 
 
 class TestSetupState:

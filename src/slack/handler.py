@@ -209,6 +209,33 @@ def _get_signing_secret() -> str:
         return secret_str
 
 
+def _get_bot_token_for_workspace(workspace_id: str) -> str:
+    """Retrieve bot_token for a workspace: SECRETS record first, CONFIG fallback.
+
+    Uses KMS_KEY_ID env var if present for decryption. Falls back to plaintext
+    WorkspaceConfig if KMS is not available. Raises ValueError if not found.
+    """
+    from security.crypto import FieldEncryptor
+
+    kms_key_id = os.environ.get("KMS_KEY_ID", "")
+    state_store = _get_state_store()
+
+    if kms_key_id:
+        encryptor = FieldEncryptor(kms_key_id=kms_key_id)
+        token: str = state_store.get_bot_token(
+            workspace_id=workspace_id, encryptor=encryptor
+        )
+        return token
+
+    # No KMS — fall back to plaintext WorkspaceConfig
+    config = state_store.get_workspace_config(workspace_id=workspace_id)
+    if config and config.bot_token:
+        return str(config.bot_token)
+
+    msg = f"No bot_token found for workspace {workspace_id}"
+    raise ValueError(msg)
+
+
 def _send_ephemeral_rejection(
     *,
     workspace_id: str,
@@ -216,16 +243,20 @@ def _send_ephemeral_rejection(
     user_id: str,
     text: str,
 ) -> None:
-    """Send an ephemeral rejection message to the user."""
-    state_store = _get_state_store()
-    config = state_store.get_workspace_config(workspace_id=workspace_id)
-    if not config or not config.bot_token:
+    """Send an ephemeral rejection message to the user.
+
+    Uses get_bot_token for unified token retrieval: DynamoDB SECRETS first,
+    fallback to WorkspaceConfig plaintext with lazy migration.
+    """
+    try:
+        bot_token = _get_bot_token_for_workspace(workspace_id)
+    except ValueError:
         logger.warning(
             "No bot_token for workspace %s, skipping ephemeral", workspace_id
         )
         return
     try:
-        slack_client = SlackClient(web_client=WebClient(token=config.bot_token))
+        slack_client = SlackClient(web_client=WebClient(token=bot_token))
         slack_client.send_ephemeral(channel=channel_id, user=user_id, text=text)
     except Exception:
         logger.exception("Failed to send ephemeral rejection")
