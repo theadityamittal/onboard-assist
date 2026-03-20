@@ -100,6 +100,14 @@ def _handle_event(body_str: str) -> dict[str, Any]:
         logger.debug("URL verification challenge")
         return _json_response(200, {"challenge": body["challenge"]})
 
+    # Kill switch check
+    from admin.kill_switch_check import is_kill_switch_active
+
+    state_store = _get_state_store()
+    if is_kill_switch_active(state_store):
+        logger.info("Kill switch active, skipping event processing")
+        return _json_response(200, {"ok": True})
+
     # Parse event
     slack_event = SlackEvent.from_event_body(body)
     logger.debug(
@@ -253,6 +261,14 @@ def _handle_interaction(body_str: str) -> dict[str, Any]:
 
     The body is form-encoded with a single `payload` field containing JSON.
     """
+    # Kill switch check
+    from admin.kill_switch_check import is_kill_switch_active
+
+    state_store = _get_state_store()
+    if is_kill_switch_active(state_store):
+        logger.info("Kill switch active, skipping interaction processing")
+        return _json_response(200, {"ok": True})
+
     try:
         parsed = parse_qs(body_str)
         if "payload" not in parsed:
@@ -333,12 +349,12 @@ def _handle_interaction(body_str: str) -> dict[str, Any]:
 
 def _build_middleware_chain(*, workspace_id: str) -> Any:
     """Build the inbound middleware chain with real dependencies."""
-    from middleware.inbound.chain import InboundMiddlewareChain
+    from middleware.inbound.chain import HandlerMiddlewareChain
 
     state_store = _get_state_store()
     config = state_store.get_workspace_config(workspace_id=workspace_id)
     bot_user_id = config.bot_user_id if config else ""
-    return InboundMiddlewareChain(state_store=state_store, bot_user_id=bot_user_id)
+    return HandlerMiddlewareChain(state_store=state_store, bot_user_id=bot_user_id)
 
 
 def _get_state_store() -> Any:

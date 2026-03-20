@@ -513,3 +513,37 @@ class TestSendSetupPendingDm:
 
         # Should not raise
         _send_setup_pending_dm(workspace_id="W1", user_id="U1")
+
+
+class TestHandlerKillSwitch:
+    @patch("slack.handler._get_signing_secret", return_value="test-secret")
+    @patch("slack.handler.verify_slack_signature")
+    @patch("admin.kill_switch_check.is_kill_switch_active", return_value=True)
+    @patch("slack.handler._get_state_store")
+    def test_returns_200_when_kill_switch_active(
+        self, mock_store, mock_kill, mock_verify, mock_secret
+    ):
+        """Handler returns 200 and skips enqueue when kill switch is on."""
+        event = {
+            "path": "/slack/events",
+            "headers": {
+                "X-Slack-Request-Timestamp": "123",
+                "X-Slack-Signature": "v0=abc",
+            },
+            "body": json.dumps(
+                {
+                    "type": "event_callback",
+                    "event": {
+                        "type": "message",
+                        "user": "U1",
+                        "text": "hi",
+                        "channel": "C1",
+                        "ts": "1",
+                    },
+                    "event_id": "Ev1",
+                    "team_id": "W1",
+                }
+            ),
+        }
+        result = lambda_handler(event, None)
+        assert result["statusCode"] == 200
