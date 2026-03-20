@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import agent.worker as _worker_module
 import pytest
-from agent.worker import _get_bot_token, _send_slack_message, lambda_handler
+from agent.worker import _get_bot_token, lambda_handler
 
 
 @pytest.fixture(autouse=True)
@@ -40,13 +40,23 @@ def _message_body(**overrides) -> dict:
 
 class TestLambdaHandler:
     @patch("agent.worker._release_user_lock")
-    @patch("agent.worker._send_slack_message")
+    @patch("agent.worker._get_setup_state", return_value=None)
     @patch("agent.worker._get_bot_token")
     @patch("agent.worker._create_orchestrator")
+    @patch("agent.worker.SlackClient")
+    @patch("agent.worker.WebClient")
     def test_processes_sqs_message(
-        self, mock_create_orch, mock_get_token, mock_send, mock_release
+        self,
+        mock_web_client_cls,
+        mock_slack_client_cls,
+        mock_create_orch,
+        mock_get_token,
+        mock_get_setup,
+        mock_release,
     ):
         mock_get_token.return_value = "xoxb-fake"
+        mock_slack_client = MagicMock()
+        mock_slack_client_cls.return_value = mock_slack_client
         mock_orch = MagicMock()
         mock_orch.process_turn.return_value = "Hello volunteer!"
         mock_create_orch.return_value = mock_orch
@@ -56,19 +66,29 @@ class TestLambdaHandler:
 
         assert result["statusCode"] == 200
         mock_orch.process_turn.assert_called_once_with(user_message="hi")
-        mock_send.assert_called_once_with(
-            bot_token="xoxb-fake", channel_id="C1", text="Hello volunteer!"
+        mock_slack_client.send_message.assert_called_once_with(
+            channel="C1", text="Hello volunteer!"
         )
         mock_release.assert_called_once_with(workspace_id="W1", user_id="U1")
 
     @patch("agent.worker._release_user_lock")
-    @patch("agent.worker._send_slack_message")
+    @patch("agent.worker._get_setup_state", return_value=None)
     @patch("agent.worker._get_bot_token")
     @patch("agent.worker._create_orchestrator")
+    @patch("agent.worker.SlackClient")
+    @patch("agent.worker.WebClient")
     def test_handles_orchestrator_error(
-        self, mock_create_orch, mock_get_token, mock_send, mock_release
+        self,
+        mock_web_client_cls,
+        mock_slack_client_cls,
+        mock_create_orch,
+        mock_get_token,
+        mock_get_setup,
+        mock_release,
     ):
         mock_get_token.return_value = "xoxb-fake"
+        mock_slack_client = MagicMock()
+        mock_slack_client_cls.return_value = mock_slack_client
         mock_orch = MagicMock()
         mock_orch.process_turn.side_effect = Exception("LLM timeout")
         mock_create_orch.return_value = mock_orch
@@ -77,13 +97,20 @@ class TestLambdaHandler:
         result = lambda_handler(event, None)
 
         assert result["statusCode"] == 500
-        mock_send.assert_not_called()
+        mock_slack_client.send_message.assert_not_called()
         mock_release.assert_called_once_with(workspace_id="W1", user_id="U1")
 
-    @patch("agent.worker._send_slack_message")
     @patch("agent.worker._get_bot_token")
     @patch("agent.worker._create_orchestrator")
-    def test_empty_records(self, mock_create_orch, mock_get_token, mock_send):
+    @patch("agent.worker.SlackClient")
+    @patch("agent.worker.WebClient")
+    def test_empty_records(
+        self,
+        mock_web_client_cls,
+        mock_slack_client_cls,
+        mock_create_orch,
+        mock_get_token,
+    ):
         result = lambda_handler({"Records": []}, None)
         assert result["statusCode"] == 200
         mock_create_orch.assert_not_called()
@@ -139,13 +166,162 @@ class TestGetBotToken:
                 _get_bot_token("W_MISSING")
 
 
-class TestSendSlackMessage:
-    @patch("slack_sdk.WebClient")
-    def test_sends_message(self, mock_web_client_cls):
-        mock_client = MagicMock()
-        mock_web_client_cls.return_value = mock_client
+class TestWorkerSetupRouting:
+    """Tests for SETUP record routing in the worker Lambda."""
 
-        _send_slack_message(bot_token="xoxb-test", channel_id="C1", text="hello")
+    def _make_setup_state(self, *, admin_user_id: str = "UADMIN") -> MagicMock:
+        setup_state = MagicMock()
+        setup_state.admin_user_id = admin_user_id
+        return setup_state
 
-        mock_web_client_cls.assert_called_once_with(token="xoxb-test")
-        mock_client.chat_postMessage.assert_called_once_with(channel="C1", text="hello")
+    @patch("agent.worker._release_user_lock")
+    @patch("agent.worker._get_bot_token")
+    @patch("agent.worker._create_orchestrator")
+    @patch("agent.worker.SlackClient")
+    @patch("agent.worker.WebClient")
+    @patch("agent.worker._get_setup_state")
+    @patch("agent.worker._call_process_setup_message")
+    def test_setup_record_routes_admin_to_state_machine(
+        self,
+        mock_call_setup,
+        mock_get_setup_state,
+        mock_web_client_cls,
+        mock_slack_client_cls,
+        mock_create_orch,
+        mock_get_token,
+        mock_release,
+    ):
+        """When SETUP record exists and user is the admin, route to setup state machine."""
+        mock_get_token.return_value = "xoxb-fake"
+        mock_slack_client = MagicMock()
+        mock_slack_client_cls.return_value = mock_slack_client
+
+        setup_state = self._make_setup_state(admin_user_id="UADMIN")
+        mock_get_setup_state.return_value = setup_state
+
+        event = _sqs_event(_message_body(user_id="UADMIN", workspace_id="W1"))
+        result = lambda_handler(event, None)
+
+        assert result["statusCode"] == 200
+        mock_call_setup.assert_called_once()
+        mock_create_orch.assert_not_called()
+        mock_release.assert_called_once_with(workspace_id="W1", user_id="UADMIN")
+
+    @patch("agent.worker._release_user_lock")
+    @patch("agent.worker._get_bot_token")
+    @patch("agent.worker._create_orchestrator")
+    @patch("agent.worker.SlackClient")
+    @patch("agent.worker.WebClient")
+    @patch("agent.worker._get_setup_state")
+    @patch("agent.worker._call_process_setup_message")
+    def test_setup_record_rejects_non_admin(
+        self,
+        mock_call_setup,
+        mock_get_setup_state,
+        mock_web_client_cls,
+        mock_slack_client_cls,
+        mock_create_orch,
+        mock_get_token,
+        mock_release,
+    ):
+        """When SETUP record exists but user is NOT the admin, send ephemeral rejection."""
+        mock_get_token.return_value = "xoxb-fake"
+        mock_slack_client = MagicMock()
+        mock_slack_client_cls.return_value = mock_slack_client
+
+        setup_state = self._make_setup_state(admin_user_id="UADMIN")
+        mock_get_setup_state.return_value = setup_state
+
+        event = _sqs_event(_message_body(user_id="UOTHER", workspace_id="W1"))
+        result = lambda_handler(event, None)
+
+        assert result["statusCode"] == 200
+        mock_call_setup.assert_not_called()
+        mock_create_orch.assert_not_called()
+        mock_slack_client.send_ephemeral.assert_called_once()
+        # Verify the ephemeral was sent to the right user/channel
+        call_kwargs = mock_slack_client.send_ephemeral.call_args.kwargs
+        assert call_kwargs["user"] == "UOTHER"
+        assert call_kwargs["channel"] == "C1"
+        mock_release.assert_called_once_with(workspace_id="W1", user_id="UOTHER")
+
+    @patch("agent.worker._release_user_lock")
+    @patch("agent.worker._get_bot_token")
+    @patch("agent.worker._create_orchestrator")
+    @patch("agent.worker.SlackClient")
+    @patch("agent.worker.WebClient")
+    @patch("agent.worker._get_setup_state")
+    def test_no_setup_record_routes_to_orchestrator(
+        self,
+        mock_get_setup_state,
+        mock_web_client_cls,
+        mock_slack_client_cls,
+        mock_create_orch,
+        mock_get_token,
+        mock_release,
+    ):
+        """When no SETUP record exists, normal orchestrator flow runs."""
+        mock_get_token.return_value = "xoxb-fake"
+        mock_slack_client = MagicMock()
+        mock_slack_client_cls.return_value = mock_slack_client
+        mock_orch = MagicMock()
+        mock_orch.process_turn.return_value = "Hello!"
+        mock_create_orch.return_value = mock_orch
+
+        mock_get_setup_state.return_value = None  # No SETUP record
+
+        event = _sqs_event(_message_body(user_id="U1", workspace_id="W1"))
+        result = lambda_handler(event, None)
+
+        assert result["statusCode"] == 200
+        mock_create_orch.assert_called_once()
+        mock_orch.process_turn.assert_called_once_with(user_message="hi")
+        mock_release.assert_called_once_with(workspace_id="W1", user_id="U1")
+
+    @patch("agent.worker._release_user_lock")
+    @patch("agent.worker._get_bot_token")
+    @patch("agent.worker._create_orchestrator")
+    @patch("agent.worker.SlackClient")
+    @patch("agent.worker.WebClient")
+    @patch("agent.worker._get_setup_state")
+    @patch("agent.worker._call_process_setup_message")
+    def test_interaction_action_routes_to_setup_when_applicable(
+        self,
+        mock_call_setup,
+        mock_get_setup_state,
+        mock_web_client_cls,
+        mock_slack_client_cls,
+        mock_create_orch,
+        mock_get_token,
+        mock_release,
+    ):
+        """Interaction event with action_id routes admin to setup state machine."""
+        mock_get_token.return_value = "xoxb-fake"
+        mock_slack_client = MagicMock()
+        mock_slack_client_cls.return_value = mock_slack_client
+
+        setup_state = self._make_setup_state(admin_user_id="UADMIN")
+        mock_get_setup_state.return_value = setup_state
+
+        body = _message_body(
+            user_id="UADMIN",
+            workspace_id="W1",
+            event_type="interaction",
+            metadata={
+                "is_dm": True,
+                "command": None,
+                "thread_ts": None,
+                "action_id": "teams_confirm",
+                "action_value": None,
+            },
+        )
+        event = _sqs_event(body)
+        result = lambda_handler(event, None)
+
+        assert result["statusCode"] == 200
+        mock_call_setup.assert_called_once()
+        # Verify action_id was passed through
+        call_kwargs = mock_call_setup.call_args.kwargs
+        assert call_kwargs.get("action_id") == "teams_confirm"
+        mock_create_orch.assert_not_called()
+        mock_release.assert_called_once_with(workspace_id="W1", user_id="UADMIN")

@@ -21,9 +21,11 @@ from typing import Any
 from urllib.parse import parse_qs
 
 import boto3
+from slack.client import SlackClient
 from slack.commands import handle_command
 from slack.models import SlackCommand, SlackEvent, SQSMessage
 from slack.signature import InvalidSignatureError, verify_slack_signature
+from slack_sdk import WebClient
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -108,6 +110,11 @@ def _handle_event(body_str: str) -> dict[str, Any]:
         slack_event.text[:80] if slack_event.text else "(empty)",
     )
 
+    # Setup gating: check workspace setup_complete before middleware
+    gating_response = _check_setup_gating(slack_event)
+    if gating_response is not None:
+        return gating_response
+
     # Run middleware chain
     chain = _build_middleware_chain(workspace_id=slack_event.workspace_id)
     result = chain.run(slack_event)
@@ -149,6 +156,83 @@ def _handle_event(body_str: str) -> dict[str, Any]:
     return _json_response(200, {"ok": True})
 
 
+def _check_setup_gating(slack_event: Any) -> dict[str, Any] | None:
+    """Check workspace setup_complete; return a response dict to short-circuit, or None to proceed.
+
+    Returns:
+        A 200 response dict if the event should be blocked/handled specially during setup.
+        None if the event should proceed through normal middleware.
+    """
+    from slack.models import EventType
+    from state.models import OnboardingPlan, PlanStatus
+
+    state_store = _get_state_store()
+    config = state_store.get_workspace_config(workspace_id=slack_event.workspace_id)
+
+    # No config or setup already complete → proceed normally
+    if config is None or config.setup_complete:
+        return None
+
+    # Setup is incomplete
+    if slack_event.event_type == EventType.TEAM_JOIN:
+        # Create a pending onboarding plan for the new user
+        plan = OnboardingPlan(
+            workspace_id=slack_event.workspace_id,
+            user_id=slack_event.user_id,
+            user_name="",
+            role="",
+            status=PlanStatus.PENDING_SETUP,
+            version=1,
+            steps=[],
+        )
+        state_store.save_plan(plan)
+
+        # Send brief DM to the new user
+        _send_setup_pending_dm(
+            workspace_id=slack_event.workspace_id,
+            user_id=slack_event.user_id,
+        )
+        logger.info(
+            "team_join during setup: created PENDING_SETUP plan for user %s",
+            slack_event.user_id,
+        )
+        return _json_response(200, {"ok": True})
+
+    # Admin can interact during setup
+    if slack_event.user_id == config.admin_user_id:
+        return None
+
+    # Non-admin: send ephemeral rejection
+    if slack_event.channel_id:
+        _send_ephemeral_rejection(
+            workspace_id=slack_event.workspace_id,
+            channel_id=slack_event.channel_id,
+            user_id=slack_event.user_id,
+            text="We're still setting up. Please check back soon!",
+        )
+    logger.info("Setup incomplete: blocked non-admin user %s", slack_event.user_id)
+    return _json_response(200, {"ok": True})
+
+
+def _send_setup_pending_dm(*, workspace_id: str, user_id: str) -> None:
+    """Send a brief DM to a user who joined during setup."""
+    try:
+        bot_token = _get_bot_token_for_workspace(workspace_id)
+    except ValueError:
+        logger.warning(
+            "No bot_token for workspace %s, skipping setup-pending DM", workspace_id
+        )
+        return
+    try:
+        slack_client = SlackClient(web_client=WebClient(token=bot_token))
+        slack_client.send_message(
+            channel=user_id,
+            text="Welcome! We're still setting up — we'll reach out soon to get you onboarded.",
+        )
+    except Exception:
+        logger.exception("Failed to send setup-pending DM to user %s", user_id)
+
+
 def _handle_slash_command(body_str: str) -> dict[str, Any]:
     """Handle slash commands (form-encoded body)."""
     try:
@@ -165,10 +249,85 @@ def _handle_slash_command(body_str: str) -> dict[str, Any]:
 
 
 def _handle_interaction(body_str: str) -> dict[str, Any]:
-    """Handle interactive component callbacks (buttons, modals).
+    """Handle Block Kit interaction callbacks (buttons, modals).
 
-    Stub for Phase 2 — will be implemented when agent brain is added.
+    The body is form-encoded with a single `payload` field containing JSON.
     """
+    try:
+        parsed = parse_qs(body_str)
+        if "payload" not in parsed:
+            logger.warning("Interaction body missing 'payload' field")
+            return _json_response(400, {"error": "Missing payload"})
+        payload = json.loads(parsed["payload"][0])
+    except (KeyError, json.JSONDecodeError, ValueError) as e:
+        logger.warning("Failed to parse interaction payload: %s", e)
+        return _json_response(400, {"error": "Invalid payload"})
+
+    payload_type = payload.get("type", "")
+    if payload_type != "block_actions":
+        logger.warning("Unsupported interaction type: %s", payload_type)
+        return _json_response(400, {"error": f"Unsupported type: {payload_type}"})
+
+    user_id = payload.get("user", {}).get("id", "")
+    team_id = payload.get("team", {}).get("id", "")
+    channel_id = payload.get("channel", {}).get("id", "")
+    message_ts = payload.get("message", {}).get("ts", "")
+
+    actions = payload.get("actions", [])
+    first_action = actions[0] if actions else {}
+    action_id = first_action.get("action_id", "")
+    action_value = first_action.get("value", "")
+
+    # Build a synthetic SlackEvent so middleware can run (ConcurrencyGuard,
+    # BotFilter, TokenBudgetGuard).  EmptyFilter and InputSanitizer are
+    # skipped because INTERACTION is not TEAM_JOIN but also has no text body
+    # — we handle that by passing an empty string and relying on the chain
+    # skipping those steps via the INTERACTION type.
+    from slack.models import EventType, SlackEvent
+
+    slack_event = SlackEvent(
+        event_id=f"interaction:{team_id}:{user_id}:{message_ts}",
+        workspace_id=team_id,
+        user_id=user_id,
+        channel_id=channel_id,
+        text="",
+        event_type=EventType.INTERACTION,
+        timestamp=message_ts,
+        is_bot=False,
+    )
+
+    chain = _build_middleware_chain(workspace_id=team_id)
+    result = chain.run(slack_event)
+    logger.debug(
+        "Interaction middleware result: allowed=%s, reason=%s",
+        result.allowed,
+        result.reason,
+    )
+
+    if not result.allowed:
+        logger.info(
+            "Interaction blocked by middleware: %s (reason: %s)",
+            slack_event.event_id,
+            result.reason,
+        )
+        return _json_response(200, {"ok": True})
+
+    sqs_msg = SQSMessage(
+        version="1.0",
+        event_id=slack_event.event_id,
+        workspace_id=team_id,
+        user_id=user_id,
+        channel_id=channel_id,
+        event_type=EventType.INTERACTION,
+        text="",
+        timestamp=message_ts,
+        is_dm=channel_id.startswith("D"),
+        action_id=action_id,
+        action_value=action_value,
+    )
+    logger.debug("Interaction SQS message: %s", json.dumps(sqs_msg.to_dict())[:300])
+    _enqueue_to_sqs(sqs_msg)
+
     return _json_response(200, {"ok": True})
 
 
@@ -207,6 +366,33 @@ def _get_signing_secret() -> str:
         return secret_str
 
 
+def _get_bot_token_for_workspace(workspace_id: str) -> str:
+    """Retrieve bot_token for a workspace: SECRETS record first, CONFIG fallback.
+
+    Uses KMS_KEY_ID env var if present for decryption. Falls back to plaintext
+    WorkspaceConfig if KMS is not available. Raises ValueError if not found.
+    """
+    from security.crypto import FieldEncryptor
+
+    kms_key_id = os.environ.get("KMS_KEY_ID", "")
+    state_store = _get_state_store()
+
+    if kms_key_id:
+        encryptor = FieldEncryptor(kms_key_id=kms_key_id)
+        token: str = state_store.get_bot_token(
+            workspace_id=workspace_id, encryptor=encryptor
+        )
+        return token
+
+    # No KMS — fall back to plaintext WorkspaceConfig
+    config = state_store.get_workspace_config(workspace_id=workspace_id)
+    if config and config.bot_token:
+        return str(config.bot_token)
+
+    msg = f"No bot_token found for workspace {workspace_id}"
+    raise ValueError(msg)
+
+
 def _send_ephemeral_rejection(
     *,
     workspace_id: str,
@@ -214,23 +400,21 @@ def _send_ephemeral_rejection(
     user_id: str,
     text: str,
 ) -> None:
-    """Send an ephemeral rejection message to the user."""
-    state_store = _get_state_store()
-    config = state_store.get_workspace_config(workspace_id=workspace_id)
-    if not config or not config.bot_token:
+    """Send an ephemeral rejection message to the user.
+
+    Uses get_bot_token for unified token retrieval: DynamoDB SECRETS first,
+    fallback to WorkspaceConfig plaintext with lazy migration.
+    """
+    try:
+        bot_token = _get_bot_token_for_workspace(workspace_id)
+    except ValueError:
         logger.warning(
             "No bot_token for workspace %s, skipping ephemeral", workspace_id
         )
         return
     try:
-        from slack_sdk import WebClient
-
-        client = WebClient(token=config.bot_token)
-        client.chat_postEphemeral(
-            channel=channel_id,
-            user=user_id,
-            text=text,
-        )
+        slack_client = SlackClient(web_client=WebClient(token=bot_token))
+        slack_client.send_ephemeral(channel=channel_id, user=user_id, text=text)
     except Exception:
         logger.exception("Failed to send ephemeral rejection")
 

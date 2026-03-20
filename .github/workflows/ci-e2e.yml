@@ -1,7 +1,9 @@
 name: 'E2E Tests'
 
 on:
-  push:
+  workflow_run:
+    workflows: ['Deploy']
+    types: [completed]
     branches: [main]
   workflow_dispatch:
 
@@ -15,11 +17,16 @@ env:
 jobs:
   e2e-tests:
     name: 'E2E Tests'
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -41,6 +48,10 @@ jobs:
         env:
           SLACK_SIGNING_SECRET: ${{ secrets.SLACK_SIGNING_SECRET }}
           PINECONE_API_KEY: ${{ secrets.PINECONE_API_KEY }}
+          KMS_KEY_ID: ${{ secrets.KMS_KEY_ID }}
+          GOOGLE_OAUTH_CLIENT_ID: ${{ secrets.GOOGLE_OAUTH_CLIENT_ID }}
+          GOOGLE_OAUTH_CLIENT_SECRET: ${{ secrets.GOOGLE_OAUTH_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
         run: |
           pytest tests/e2e/ \
             -v \

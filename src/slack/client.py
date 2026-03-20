@@ -10,6 +10,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+_ALREADY_IN_CHANNEL = "already_in_channel"
+_PAID_ONLY = "paid_only"
+
 
 class SlackClient:
     """Wrapper around slack_sdk WebClient."""
@@ -49,3 +52,43 @@ class SlackClient:
         if blocks is not None:
             kwargs["blocks"] = blocks
         self._client.chat_update(**kwargs)
+
+    def invite_to_channel(self, *, channel_id: str, user_id: str) -> bool:
+        """Invite user to channel. Returns True (idempotent on already_in_channel)."""
+        from slack_sdk.errors import SlackApiError
+
+        try:
+            self._client.conversations_invite(channel=channel_id, users=user_id)
+            return True
+        except SlackApiError as e:
+            if _ALREADY_IN_CHANNEL in str(e):
+                return True
+            raise
+
+    def get_user_email(self, *, user_id: str) -> str | None:
+        """Return email from user profile, or None if unavailable."""
+        response = self._client.users_info(user=user_id)
+        user_data = response.get("user") or {}
+        profile: dict[str, Any] = user_data.get("profile", {})
+        email = profile.get("email")
+        return str(email) if email else None
+
+    def list_channels(self) -> list[dict[str, Any]]:
+        """Return list of public channel dicts."""
+        response = self._client.conversations_list(types="public_channel")
+        channels: list[dict[str, Any]] = response.get("channels", [])
+        return channels
+
+    def list_usergroups(self) -> list[dict[str, Any]]:
+        """Return list of usergroup dicts. Returns [] on free-plan (paid_only) error."""
+        from slack_sdk.errors import SlackApiError
+
+        try:
+            response = self._client.usergroups_list()
+            groups: list[dict[str, Any]] = response.get("usergroups", [])
+            return groups
+        except SlackApiError as e:
+            if _PAID_ONLY in str(e):
+                logger.debug("list_usergroups: paid_only error, returning empty list")
+                return []
+            raise

@@ -14,6 +14,7 @@ class EventType(Enum):
     APP_MENTION = "app_mention"
     TEAM_JOIN = "team_join"
     COMMAND = "command"
+    INTERACTION = "interaction"
 
 
 @dataclass(frozen=True)
@@ -112,6 +113,8 @@ class SQSMessage:
     is_dm: bool = False
     thread_ts: str | None = None
     command: str | None = None
+    action_id: str | None = None
+    action_value: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to dict for SQS message body."""
@@ -128,6 +131,8 @@ class SQSMessage:
                 "is_dm": self.is_dm,
                 "command": self.command,
                 "thread_ts": self.thread_ts,
+                "action_id": self.action_id,
+                "action_value": self.action_value,
             },
         }
 
@@ -148,6 +153,8 @@ class SQSMessage:
             is_dm=metadata.get("is_dm", False),
             thread_ts=metadata.get("thread_ts"),
             command=metadata.get("command"),
+            action_id=metadata.get("action_id"),
+            action_value=metadata.get("action_value"),
         )
 
 

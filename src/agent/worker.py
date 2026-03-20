@@ -8,6 +8,8 @@ import os
 from typing import Any
 
 import boto3
+from slack.client import SlackClient
+from slack_sdk import WebClient
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -38,7 +40,7 @@ def _get_app_secrets() -> dict[str, str]:
 
 
 def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
-    """Process an SQS message: parse → orchestrate → respond via Slack."""
+    """Process an SQS message: parse → SETUP check → orchestrate → respond via Slack."""
     logger.debug(
         "lambda_handler invoked with %d records", len(event.get("Records", []))
     )
@@ -51,12 +53,16 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
             user_id = message["user_id"]
             channel_id = message["channel_id"]
             text = message["text"]
+            event_type = message.get("event_type", "message")
+            metadata = message.get("metadata") or {}
+            action_id = metadata.get("action_id")
 
             logger.info(
-                "Processing message workspace=%s user=%s channel=%s text=%s",
+                "Processing message workspace=%s user=%s channel=%s event_type=%s text=%s",
                 workspace_id,
                 user_id,
                 channel_id,
+                event_type,
                 text[:80],
             )
 
@@ -64,12 +70,48 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
             bot_token = _get_bot_token(workspace_id)
             logger.debug("Bot token retrieved (length=%d)", len(bot_token))
 
+            slack_client = SlackClient(web_client=WebClient(token=bot_token))
+            logger.debug("SlackClient created")
+
+            # Check for active SETUP record — route to setup state machine if present
+            setup_state = _get_setup_state(workspace_id=workspace_id)
+            if setup_state is not None:
+                logger.info(
+                    "SETUP record found for workspace=%s, admin=%s",
+                    workspace_id,
+                    setup_state.admin_user_id,
+                )
+                try:
+                    if user_id == setup_state.admin_user_id:
+                        logger.debug(
+                            "Routing admin user=%s to setup state machine", user_id
+                        )
+                        _call_process_setup_message(
+                            text=text,
+                            action_id=action_id,
+                            setup_state=setup_state,
+                            slack_client=slack_client,
+                            workspace_id=workspace_id,
+                        )
+                    else:
+                        logger.debug(
+                            "Non-admin user=%s during setup, sending ephemeral", user_id
+                        )
+                        slack_client.send_ephemeral(
+                            channel=channel_id,
+                            user=user_id,
+                            text="Setup is in progress. Please wait for the admin to complete workspace configuration.",
+                        )
+                finally:
+                    _release_user_lock(workspace_id=workspace_id, user_id=user_id)
+                continue
+
             logger.debug("Creating orchestrator")
             orchestrator = _create_orchestrator(
                 workspace_id=workspace_id,
                 user_id=user_id,
                 channel_id=channel_id,
-                bot_token=bot_token,
+                slack_client=slack_client,
             )
             logger.debug("Orchestrator created successfully")
 
@@ -83,11 +125,7 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
                 )
 
                 logger.debug("Sending Slack message to channel=%s", channel_id)
-                _send_slack_message(
-                    bot_token=bot_token,
-                    channel_id=channel_id,
-                    text=response_text,
-                )
+                slack_client.send_message(channel=channel_id, text=response_text)
 
                 logger.info("Response sent to %s/%s", workspace_id, user_id)
             finally:
@@ -117,7 +155,8 @@ def _release_user_lock(*, workspace_id: str, user_id: str) -> None:
 
 
 def _get_bot_token(workspace_id: str) -> str:
-    """Get bot token from consolidated secret or DynamoDB workspace config."""
+    """Get bot token: consolidated secret → DynamoDB SECRETS → WorkspaceConfig (with migration)."""
+    # 1. Try consolidated Secrets Manager secret (deployment-time secret)
     try:
         secrets = _get_app_secrets()
         token = secrets.get("bot_token", "")
@@ -127,22 +166,99 @@ def _get_bot_token(workspace_id: str) -> str:
     except ValueError:
         logger.debug("_get_bot_token: APP_SECRETS_ARN not set, trying DynamoDB")
 
+    # 2. Try DynamoDB SECRETS record (per-workspace, post-OAuth) with lazy migration fallback
+    from security.crypto import FieldEncryptor
     from state.dynamo import DynamoStateStore
 
+    kms_key_id = os.environ.get("KMS_KEY_ID", "")
     table_name = os.environ.get("DYNAMODB_TABLE_NAME", "onboard-assist")
     table = boto3.resource("dynamodb").Table(table_name)
     store = DynamoStateStore(table=table)
+
+    if kms_key_id:
+        try:
+            encryptor = FieldEncryptor(kms_key_id=kms_key_id)
+            token = store.get_bot_token(workspace_id=workspace_id, encryptor=encryptor)
+            logger.debug("_get_bot_token: found via DynamoDB SECRETS/CONFIG")
+            return token
+        except ValueError:
+            pass
+
+    # 3. Fallback: plaintext WorkspaceConfig (no KMS available)
     config = store.get_workspace_config(workspace_id=workspace_id)
-    if config:
-        logger.debug("_get_bot_token: found workspace config")
+    if config and config.bot_token:
+        logger.debug("_get_bot_token: found in plaintext workspace config")
         return str(config.bot_token)
 
     msg = f"No bot token found for workspace {workspace_id}"
     raise ValueError(msg)
 
 
+def _get_setup_state(*, workspace_id: str) -> Any:
+    """Return the active SETUP record for the workspace, or None if absent."""
+    from state.dynamo import DynamoStateStore
+
+    table_name = os.environ.get("DYNAMODB_TABLE_NAME", "onboard-assist")
+    table = boto3.resource("dynamodb").Table(table_name)
+    store = DynamoStateStore(table=table)
+    result = store.get_setup_state(workspace_id=workspace_id)
+    logger.debug(
+        "_get_setup_state: workspace=%s found=%s", workspace_id, result is not None
+    )
+    return result
+
+
+def _call_process_setup_message(
+    *,
+    text: str,
+    action_id: str | None,
+    setup_state: Any,
+    slack_client: Any,
+    workspace_id: str,
+) -> None:
+    """Build minimal SetupDependencies and delegate to process_setup_message."""
+    from admin.setup import SetupDependencies, process_setup_message
+    from state.dynamo import DynamoStateStore
+
+    table_name = os.environ.get("DYNAMODB_TABLE_NAME", "onboard-assist")
+    table = boto3.resource("dynamodb").Table(table_name)
+    state_store = DynamoStateStore(table=table)
+
+    sqs_queue_url = os.environ.get("SQS_QUEUE_URL", "")
+    google_client_id = os.environ.get("GOOGLE_CLIENT_ID", "")
+    google_oauth_redirect_uri = os.environ.get("GOOGLE_OAUTH_REDIRECT_URI", "")
+
+    deps = SetupDependencies(
+        state_store=state_store,
+        slack_client=slack_client,
+        encryptor=None,
+        sqs_queue_url=sqs_queue_url,
+        google_client_id=google_client_id,
+        google_oauth_redirect_uri=google_oauth_redirect_uri,
+        lambda_context=None,
+        sqs_client=boto3.client("sqs") if sqs_queue_url else None,
+    )
+
+    logger.debug(
+        "_call_process_setup_message: workspace=%s step=%s action_id=%s",
+        workspace_id,
+        setup_state.step,
+        action_id,
+    )
+    process_setup_message(
+        text=text,
+        action_id=action_id,
+        setup_state=setup_state,
+        deps=deps,
+    )
+
+
 def _create_orchestrator(
-    *, workspace_id: str, user_id: str, channel_id: str, bot_token: str
+    *,
+    workspace_id: str,
+    user_id: str,
+    channel_id: str,
+    slack_client: SlackClient,
 ) -> Any:
     """Wire up the orchestrator with all dependencies."""
     logger.debug("_create_orchestrator: importing dependencies")
@@ -157,8 +273,6 @@ def _create_orchestrator(
     from llm.router import LLMRouter
     from middleware.agent.turn_budget import TurnBudgetEnforcer
     from rag.vectorstore import PineconeVectorStore
-    from slack.client import SlackClient
-    from slack_sdk import WebClient
     from state.dynamo import DynamoStateStore
 
     logger.debug("_create_orchestrator: imports complete, loading settings")
@@ -187,9 +301,7 @@ def _create_orchestrator(
         settings.generation_model_id,
     )
 
-    web_client = WebClient(token=bot_token)
-    slack_client = SlackClient(web_client=web_client)
-    logger.debug("_create_orchestrator: Slack client ready")
+    logger.debug("_create_orchestrator: Slack client received")
 
     pinecone_key = secrets["pinecone_api_key"]
     logger.debug(
@@ -206,7 +318,7 @@ def _create_orchestrator(
         "send_message": SendMessageTool(
             slack_client=slack_client, channel_id=channel_id
         ),
-        "assign_channel": AssignChannelTool(web_client=web_client, user_id=user_id),
+        "assign_channel": AssignChannelTool(slack_client=slack_client, user_id=user_id),
         "calendar_event": CalendarEventTool(),
         "manage_progress": ManageProgressTool(
             state_store=state_store,
@@ -236,17 +348,3 @@ def _create_orchestrator(
         channel_id=channel_id,
         budget=budget,
     )
-
-
-def _send_slack_message(*, bot_token: str, channel_id: str, text: str) -> None:
-    """Send a message via Slack API."""
-    from slack_sdk import WebClient
-
-    logger.debug(
-        "_send_slack_message: posting to channel=%s, text_length=%d",
-        channel_id,
-        len(text),
-    )
-    client = WebClient(token=bot_token)
-    result = client.chat_postMessage(channel=channel_id, text=text)
-    logger.debug("_send_slack_message: Slack API response ok=%s", result.get("ok"))
