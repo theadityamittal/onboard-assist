@@ -197,18 +197,7 @@ def _release_user_lock(*, workspace_id: str, user_id: str) -> None:
 
 
 def _get_bot_token(workspace_id: str) -> str:
-    """Get bot token: consolidated secret → DynamoDB SECRETS → WorkspaceConfig (with migration)."""
-    # 1. Try consolidated Secrets Manager secret (deployment-time secret)
-    try:
-        secrets = _get_app_secrets()
-        token = secrets.get("bot_token", "")
-        if token and token != "placeholder":
-            logger.debug("_get_bot_token: found in consolidated secret")
-            return str(token)
-    except ValueError:
-        logger.debug("_get_bot_token: APP_SECRETS_ARN not set, trying DynamoDB")
-
-    # 2. Try DynamoDB SECRETS record (per-workspace, post-OAuth) with lazy migration fallback
+    """Get bot token: DynamoDB SECRETS (KMS) → plaintext WorkspaceConfig fallback."""
     from security.crypto import FieldEncryptor
     from state.dynamo import DynamoStateStore
 
@@ -217,16 +206,17 @@ def _get_bot_token(workspace_id: str) -> str:
     table = boto3.resource("dynamodb").Table(table_name)
     store = DynamoStateStore(table=table)
 
+    # Tier 1: DynamoDB SECRETS record (KMS-encrypted, per-workspace)
     if kms_key_id:
         try:
             encryptor = FieldEncryptor(kms_key_id=kms_key_id)
             token = store.get_bot_token(workspace_id=workspace_id, encryptor=encryptor)
-            logger.debug("_get_bot_token: found via DynamoDB SECRETS/CONFIG")
-            return token
+            logger.debug("_get_bot_token: found via DynamoDB SECRETS")
+            return str(token)
         except ValueError:
             pass
 
-    # 3. Fallback: plaintext WorkspaceConfig (no KMS available)
+    # Tier 2: plaintext WorkspaceConfig (legacy, triggers lazy migration)
     config = store.get_workspace_config(workspace_id=workspace_id)
     if config and config.bot_token:
         logger.debug("_get_bot_token: found in plaintext workspace config")

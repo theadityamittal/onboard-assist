@@ -118,39 +118,44 @@ class TestLambdaHandler:
 
 class TestGetBotToken:
     @patch("agent.worker.boto3")
-    def test_returns_token_from_secrets_manager(self, mock_boto3):
-        mock_client = MagicMock()
-        mock_boto3.client.return_value = mock_client
-        mock_client.get_secret_value.return_value = {
-            "SecretString": json.dumps({"bot_token": "xoxb-real-token"})
-        }
+    def test_returns_token_from_dynamo_secrets(self, mock_boto3):
+        """Primary path: DynamoDB SECRETS via KMS decryption."""
+        mock_table = MagicMock()
+        mock_boto3.resource.return_value.Table.return_value = mock_table
 
-        with patch.dict("os.environ", {"APP_SECRETS_ARN": "arn:aws:sm:test"}):
+        with (
+            patch.dict(
+                "os.environ", {"KMS_KEY_ID": "test-key", "DYNAMODB_TABLE_NAME": "t"}
+            ),
+            patch("state.dynamo.DynamoStateStore") as mock_store_cls,
+            patch("security.crypto.FieldEncryptor"),
+        ):
+            mock_store_cls.return_value.get_bot_token.return_value = "xoxb-encrypted"
             token = _get_bot_token("W1")
 
-        assert token == "xoxb-real-token"
+        assert token == "xoxb-encrypted"
 
     @patch("agent.worker.boto3")
-    def test_falls_back_to_dynamo_when_placeholder(self, mock_boto3):
-        mock_sm_client = MagicMock()
-        mock_boto3.client.return_value = mock_sm_client
-        mock_sm_client.get_secret_value.return_value = {
-            "SecretString": json.dumps({"bot_token": "placeholder"})
-        }
+    def test_falls_back_to_plaintext_config(self, mock_boto3):
+        """Fallback: plaintext WorkspaceConfig when no KMS key."""
         mock_table = MagicMock()
         mock_boto3.resource.return_value.Table.return_value = mock_table
 
         mock_config = MagicMock()
-        mock_config.bot_token = "xoxb-dynamo-token"
+        mock_config.bot_token = "xoxb-plain"
 
         with (
-            patch.dict("os.environ", {"APP_SECRETS_ARN": "arn:aws:sm:test"}),
+            patch.dict("os.environ", {"DYNAMODB_TABLE_NAME": "t"}, clear=False),
             patch("state.dynamo.DynamoStateStore") as mock_store_cls,
         ):
             mock_store_cls.return_value.get_workspace_config.return_value = mock_config
+            # Remove KMS_KEY_ID to trigger fallback
+            import os
+
+            os.environ.pop("KMS_KEY_ID", None)
             token = _get_bot_token("W1")
 
-        assert token == "xoxb-dynamo-token"
+        assert token == "xoxb-plain"
 
     @patch("agent.worker.boto3")
     def test_raises_when_no_token_found(self, mock_boto3):
@@ -158,12 +163,24 @@ class TestGetBotToken:
         mock_boto3.resource.return_value.Table.return_value = mock_table
 
         with (
-            patch.dict("os.environ", {}, clear=False),
+            patch.dict("os.environ", {"DYNAMODB_TABLE_NAME": "t"}, clear=False),
             patch("state.dynamo.DynamoStateStore") as mock_store_cls,
         ):
             mock_store_cls.return_value.get_workspace_config.return_value = None
+            import os
+
+            os.environ.pop("KMS_KEY_ID", None)
             with pytest.raises(ValueError, match="No bot token"):
                 _get_bot_token("W_MISSING")
+
+    def test_never_reads_bot_token_from_secrets_manager(self):
+        """Verify Secrets Manager is NOT consulted for bot_token."""
+        import inspect
+
+        source = inspect.getsource(_get_bot_token)
+        assert (
+            "_get_app_secrets" not in source
+        ), "bot_token must not be fetched from Secrets Manager"
 
 
 class TestWorkerSetupRouting:
