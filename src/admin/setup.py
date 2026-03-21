@@ -176,6 +176,15 @@ def _handle_awaiting_url(
     *, text: str, action_id: str | None, state: SetupState, deps: SetupDependencies
 ) -> SetupState:
     """Validate URL, kick off scraping, transition to scraping step."""
+    if not text.strip():
+        deps.slack_client.send_message(
+            channel=state.admin_user_id,
+            text=(
+                "Please share your company's website URL " "(e.g. https://example.com)."
+            ),
+        )
+        return state
+
     # Slack auto-links URLs: <https://example.com> or <https://example.com|example.com>
     url = text.strip().strip("<>").split("|")[0]
     if not _is_valid_url(url):
@@ -313,10 +322,22 @@ def _handle_teams(
             deps.state_store.save_setup_state(setup_state=new_state)
             return _transition_to_channels(state=new_state, deps=deps)
 
-    deps.slack_client.send_message(
-        channel=state.admin_user_id,
-        text="Please enter at least one team name.",
-    )
+    # Resume case: no action, no text — re-render current step
+    if state.teams:
+        blocks = team_confirmation(teams=list(state.teams))
+        deps.slack_client.send_message(
+            channel=state.admin_user_id,
+            text="Here are your teams:",
+            blocks=blocks,
+        )
+    else:
+        deps.slack_client.send_message(
+            channel=state.admin_user_id,
+            text=(
+                "Please type your team names separated by commas "
+                "(e.g. Engineering, Marketing, Sales)."
+            ),
+        )
     return state
 
 
@@ -380,7 +401,8 @@ def _handle_channels(
         deps.state_store.save_setup_state(setup_state=new_state)
         return new_state
 
-    return state
+    # Resume case: no recognized action — re-render channel mapping blocks
+    return _transition_to_channels(state=state, deps=deps)
 
 
 def _slugify(text: str) -> str:
@@ -431,6 +453,13 @@ def _handle_calendar(
         deps.state_store.save_setup_state(setup_state=new_state)
         return _handle_confirmation(text="", action_id=None, state=new_state, deps=deps)
 
+    # Resume case: re-send calendar prompt
+    blocks = calendar_setup_prompt()
+    deps.slack_client.send_message(
+        channel=state.admin_user_id,
+        text="Would you like to enable Google Calendar integration?",
+        blocks=blocks,
+    )
     return state
 
 

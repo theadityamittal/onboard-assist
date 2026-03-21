@@ -674,3 +674,64 @@ class TestCalendarOAuthInitiatedField:
     def test_setup_state_accepts_true(self):
         state = _make_state(step="calendar", calendar_oauth_initiated=True)
         assert state.calendar_oauth_initiated is True
+
+
+class TestResumeHandling:
+    def test_awaiting_url_resume_sends_prompt(self):
+        """Resume at awaiting_url (text='', action_id=None) re-sends URL prompt."""
+        state = _make_state(step="awaiting_url")
+        deps = _make_deps(llm_router=MagicMock())
+
+        result = process_setup_message(
+            text="", action_id=None, setup_state=state, deps=deps
+        )
+
+        assert result.step == "awaiting_url"
+        assert result is state
+        msg = deps.slack_client.send_message.call_args[1]["text"]
+        # Must be the resume prompt, NOT the LLM fallback error
+        assert "share your company" in msg.lower()
+        # LLM should NOT be called for empty resume input
+        deps.llm_router.invoke.assert_not_called()
+
+    def test_teams_resume_with_existing_teams_re_renders_blocks(self):
+        """Resume at teams with state.teams populated re-renders team_confirmation."""
+        state = _make_state(step="teams", teams=("Engineering", "Marketing"))
+        deps = _make_deps()
+
+        result = process_setup_message(
+            text="", action_id=None, setup_state=state, deps=deps
+        )
+
+        assert result.step == "teams"
+        assert result is state
+        call_kwargs = deps.slack_client.send_message.call_args[1]
+        assert call_kwargs.get("blocks") is not None
+
+    def test_teams_resume_without_teams_sends_manual_prompt(self):
+        """Resume at teams with no teams sends manual input prompt."""
+        state = _make_state(step="teams", teams=())
+        deps = _make_deps()
+
+        result = process_setup_message(
+            text="", action_id=None, setup_state=state, deps=deps
+        )
+
+        assert result.step == "teams"
+        assert result is state
+        msg = deps.slack_client.send_message.call_args[1]["text"]
+        assert "team" in msg.lower()
+
+    def test_calendar_resume_re_sends_prompt(self):
+        """Resume at calendar (action_id=None) re-sends calendar_setup_prompt."""
+        state = _make_state(step="calendar")
+        deps = _make_deps()
+
+        result = process_setup_message(
+            text="", action_id=None, setup_state=state, deps=deps
+        )
+
+        assert result.step == "calendar"
+        assert result is state
+        call_kwargs = deps.slack_client.send_message.call_args[1]
+        assert call_kwargs.get("blocks") is not None
