@@ -3,7 +3,7 @@
 
 Routes:
 - POST /slack/events — Slack Events API (messages, mentions, team_join)
-- POST /slack/commands — Slash commands (/onboard-status, -help, -restart)
+- POST /slack/commands — Slash commands (/sherpa-status, -help, -restart)
 - POST /slack/interactions — Interactive component callbacks
 
 Strategy:
@@ -361,7 +361,7 @@ def _get_state_store() -> Any:
     """Get or create the DynamoDB state store."""
     from state.dynamo import DynamoStateStore
 
-    table_name = os.environ.get("DYNAMODB_TABLE_NAME", "onboard-assist")
+    table_name = os.environ.get("DYNAMODB_TABLE_NAME", "sherpa")
     table = boto3.resource("dynamodb").Table(table_name)
     return DynamoStateStore(table=table)
 

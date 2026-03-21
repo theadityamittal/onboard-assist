@@ -1,8 +1,8 @@
-# Onboard Assist
+# Sherpa
 
 [![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![CI](https://github.com/theadityamittal/onboard-assist/actions/workflows/ci.yml/badge.svg)](https://github.com/theadityamittal/onboard-assist/actions)
+[![CI](https://github.com/theadityamittal/sherpa/actions/workflows/ci.yml/badge.svg)](https://github.com/theadityamittal/sherpa/actions)
 ![Coverage: 90%+](https://img.shields.io/badge/coverage-90%25%2B-brightgreen.svg)
 
 Slack bot that onboards nonprofit volunteers. Asks intake questions, builds a personalized plan, then walks through it: answering from the org's knowledge base, assigning Slack channels, scheduling Google Calendar meetings. Picks up where it left off across sessions.
@@ -171,7 +171,7 @@ If somehow it hits $5/month, AWS Budgets fires an SNS alarm and the Kill Switch 
 ## Project structure
 
 ```
-onboard-assist/
+sherpa/
 ├── src/
 │   ├── config/
 │   │   └── settings.py              # Pydantic Settings, env-based config

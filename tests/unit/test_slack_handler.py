@@ -143,7 +143,7 @@ class TestSlackHandlerLambda:
         event = _make_api_gw_event(
             path="/slack/commands",
             body={
-                "command": "/onboard-help",
+                "command": "/sherpa-help",
                 "user_id": "U123",
                 "team_id": "W456",
                 "channel_id": "C789",

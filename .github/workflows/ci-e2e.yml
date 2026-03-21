@@ -40,7 +40,7 @@ jobs:
         id: cfn
         run: |
           OUTPUTS=$(aws cloudformation describe-stacks \
-            --stack-name onboard-assist \
+            --stack-name sherpa \
             --query "Stacks[0].Outputs" \
             --output json)
           echo "API_GATEWAY_URL=$(echo "$OUTPUTS" | jq -r '.[] | select(.OutputKey=="ApiEndpoint") | .OutputValue')" >> "$GITHUB_ENV"
