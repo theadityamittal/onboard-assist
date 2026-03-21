@@ -6,12 +6,21 @@ from __future__ import annotations
 import json
 from unittest.mock import MagicMock, patch
 
+import pytest
 from slack.handler import (
     _build_middleware_chain,
     _check_setup_gating,
     _send_ephemeral_rejection,
     lambda_handler,
 )
+
+
+@pytest.fixture(autouse=True)
+def _disable_kill_switch():
+    """Prevent unit tests from hitting real DynamoDB for kill switch checks."""
+    with patch("admin.kill_switch_check.is_kill_switch_active", return_value=False):
+        yield
+
 
 _EVENT_BODY = {
     "type": "event_callback",

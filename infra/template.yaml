@@ -61,7 +61,7 @@ Resources:
       BuildArchitecture: arm64
 
   # ============================================================
-  # Lambda Functions (7)
+  # Lambda Functions (6)
   # ============================================================
   SlackHandlerFunction:
     Type: AWS::Serverless::Function

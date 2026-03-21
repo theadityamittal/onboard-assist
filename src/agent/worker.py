@@ -17,6 +17,15 @@ logger.setLevel(logging.DEBUG)
 _cached_secrets: dict[str, str] | None = None
 
 
+def _get_state_store() -> Any:
+    """Get DynamoStateStore for the configured table."""
+    from state.dynamo import DynamoStateStore
+
+    table_name = os.environ.get("DYNAMODB_TABLE_NAME", "onboard-assist")
+    table = boto3.resource("dynamodb").Table(table_name)
+    return DynamoStateStore(table=table)
+
+
 def _get_app_secrets() -> dict[str, str]:
     """Read consolidated secrets from Secrets Manager. Cached per cold start."""
     global _cached_secrets  # noqa: PLW0603
@@ -56,7 +65,7 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
             event_type = message.get("event_type", "message")
             metadata = message.get("metadata") or {}
             action_id = metadata.get("action_id")
-            thread_ts = metadata.get("thread_ts")
+            thread_ts = metadata.get("thread_ts") or message.get("thread_ts")
 
             logger.info(
                 "Processing message workspace=%s user=%s channel=%s event_type=%s text=%s",
@@ -69,11 +78,8 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
 
             # Kill switch check
             from admin.kill_switch_check import is_kill_switch_active
-            from state.dynamo import DynamoStateStore
 
-            table_name = os.environ.get("DYNAMODB_TABLE_NAME", "onboard-assist")
-            table = boto3.resource("dynamodb").Table(table_name)
-            state_store = DynamoStateStore(table=table)
+            state_store = _get_state_store()
 
             if is_kill_switch_active(state_store):
                 logger.info("Kill switch active, skipping message processing")
@@ -108,11 +114,15 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
 
             if not mw_result.allowed:
                 logger.info("Worker middleware rejected: %s", mw_result.reason)
-                if mw_result.should_respond and mw_result.reason and channel_id:
-                    slack_client.send_ephemeral(
-                        channel=channel_id, user=user_id, text=mw_result.reason
-                    )
-                _release_user_lock(workspace_id=workspace_id, user_id=user_id)
+                try:
+                    if mw_result.should_respond and mw_result.reason and channel_id:
+                        slack_client.send_ephemeral(
+                            channel=channel_id, user=user_id, text=mw_result.reason
+                        )
+                except Exception:
+                    logger.exception("Failed to send ephemeral rejection")
+                finally:
+                    _release_user_lock(workspace_id=workspace_id, user_id=user_id)
                 continue
 
             # Check for active SETUP record — route to setup state machine if present
@@ -183,11 +193,7 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
 def _release_user_lock(*, workspace_id: str, user_id: str) -> None:
     """Release the per-user processing lock in DynamoDB."""
     try:
-        from state.dynamo import DynamoStateStore
-
-        table_name = os.environ.get("DYNAMODB_TABLE_NAME", "onboard-assist")
-        table = boto3.resource("dynamodb").Table(table_name)
-        store = DynamoStateStore(table=table)
+        store = _get_state_store()
         store.release_lock(workspace_id=workspace_id, user_id=user_id)
         logger.debug("Released lock for workspace=%s user=%s", workspace_id, user_id)
     except Exception:
@@ -199,12 +205,9 @@ def _release_user_lock(*, workspace_id: str, user_id: str) -> None:
 def _get_bot_token(workspace_id: str) -> str:
     """Get bot token: DynamoDB SECRETS (KMS) → plaintext WorkspaceConfig fallback."""
     from security.crypto import FieldEncryptor
-    from state.dynamo import DynamoStateStore
 
     kms_key_id = os.environ.get("KMS_KEY_ID", "")
-    table_name = os.environ.get("DYNAMODB_TABLE_NAME", "onboard-assist")
-    table = boto3.resource("dynamodb").Table(table_name)
-    store = DynamoStateStore(table=table)
+    store = _get_state_store()
 
     # Tier 1: DynamoDB SECRETS record (KMS-encrypted, per-workspace)
     if kms_key_id:
@@ -228,11 +231,7 @@ def _get_bot_token(workspace_id: str) -> str:
 
 def _get_setup_state(*, workspace_id: str) -> Any:
     """Return the active SETUP record for the workspace, or None if absent."""
-    from state.dynamo import DynamoStateStore
-
-    table_name = os.environ.get("DYNAMODB_TABLE_NAME", "onboard-assist")
-    table = boto3.resource("dynamodb").Table(table_name)
-    store = DynamoStateStore(table=table)
+    store = _get_state_store()
     result = store.get_setup_state(workspace_id=workspace_id)
     logger.debug(
         "_get_setup_state: workspace=%s found=%s", workspace_id, result is not None
@@ -250,11 +249,8 @@ def _call_process_setup_message(
 ) -> None:
     """Build minimal SetupDependencies and delegate to process_setup_message."""
     from admin.setup import SetupDependencies, process_setup_message
-    from state.dynamo import DynamoStateStore
 
-    table_name = os.environ.get("DYNAMODB_TABLE_NAME", "onboard-assist")
-    table = boto3.resource("dynamodb").Table(table_name)
-    state_store = DynamoStateStore(table=table)
+    state_store = _get_state_store()
 
     sqs_queue_url = os.environ.get("SQS_QUEUE_URL", "")
     google_client_id = os.environ.get("GOOGLE_CLIENT_ID", "")
@@ -304,7 +300,6 @@ def _create_orchestrator(
     from llm.router import LLMRouter
     from middleware.agent.turn_budget import TurnBudgetEnforcer
     from rag.vectorstore import PineconeVectorStore
-    from state.dynamo import DynamoStateStore
 
     logger.debug("_create_orchestrator: imports complete, loading settings")
     settings = get_settings()
@@ -315,8 +310,7 @@ def _create_orchestrator(
         settings.aws_region,
     )
 
-    table = boto3.resource("dynamodb").Table(settings.dynamodb_table_name)
-    state_store = DynamoStateStore(table=table)
+    state_store = _get_state_store()
     logger.debug("_create_orchestrator: DynamoDB state store ready")
 
     secrets = _get_app_secrets()

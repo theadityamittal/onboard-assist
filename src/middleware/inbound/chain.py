@@ -102,6 +102,6 @@ class WorkerMiddlewareChain:
         return MiddlewareResult.allow()
 
 
-# Backwards-compatible alias — existing imports that use InboundMiddlewareChain
-# will still work but this class is deprecated. Use HandlerMiddlewareChain + WorkerMiddlewareChain.
+# Backwards-compatible alias — DEPRECATED. Only provides handler-side middleware.
+# For full inbound processing, compose HandlerMiddlewareChain + WorkerMiddlewareChain.
 InboundMiddlewareChain = HandlerMiddlewareChain
