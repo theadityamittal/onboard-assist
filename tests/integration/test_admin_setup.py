@@ -414,12 +414,21 @@ class TestAdminSetupCalendarStep:
         )
 
         assert new_state.step == "done"
-        assert new_state.calendar_enabled is True
+        # calendar_enabled stays False until OAuth callback confirms
+        assert new_state.calendar_enabled is False
+        assert new_state.calendar_oauth_initiated is True
         # Should have sent OAuth URL message + completion summary
         assert mock_slack.send_message.call_count >= 2
         # OAuth URL message should contain accounts.google.com
         oauth_msg = mock_slack.send_message.call_args_list[0].kwargs["text"]
         assert "accounts.google.com" in oauth_msg
+        # Summary should say "Pending authorization"
+        summary_msgs = [
+            c.kwargs["text"]
+            for c in mock_slack.send_message.call_args_list
+            if "Setup Complete" in c.kwargs.get("text", "")
+        ]
+        assert any("pending" in m.lower() for m in summary_msgs)
 
     def test_calendar_skip_advances_to_done_with_calendar_disabled(self):
         """Skipping calendar should complete setup with calendar_enabled=False."""
@@ -704,8 +713,11 @@ class TestAdminSetupFullFlow:
             text="", action_id="calendar_enable", setup_state=state, deps=deps
         )
         assert state.step == "done"
-        assert state.calendar_enabled is True
+        # calendar_enabled stays False until OAuth callback confirms
+        assert state.calendar_enabled is False
+        assert state.calendar_oauth_initiated is True
 
         mock_store.complete_setup.assert_called_once()
         final_config = mock_store.complete_setup.call_args.kwargs["config_updates"]
-        assert final_config["calendar_enabled"] is True
+        # Config also False — OAuth callback will flip it
+        assert final_config["calendar_enabled"] is False
