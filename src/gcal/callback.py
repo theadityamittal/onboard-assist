@@ -69,7 +69,9 @@ def _exchange_code(code: str) -> dict[str, Any]:
             "google_client_secret", os.environ.get("GOOGLE_CLIENT_SECRET", "")
         ),
     )
-    redirect_uri = os.environ.get("GOOGLE_OAUTH_REDIRECT_URI", "")
+    redirect_uri = secrets.get(
+        "google_oauth_redirect_uri", os.environ.get("GOOGLE_OAUTH_REDIRECT_URI", "")
+    )
     return cast(
         "dict[str, Any]", client.exchange_code(code=code, redirect_uri=redirect_uri)
     )
