@@ -10,6 +10,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
 from botocore.exceptions import ClientError
+
 from state.models import CompletionRecord, OnboardingPlan, SetupState, WorkspaceConfig
 from state.ttl import (
     ttl_for_injection_log,

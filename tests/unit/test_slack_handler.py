@@ -7,6 +7,7 @@ import json
 from unittest.mock import MagicMock, patch
 
 import pytest
+
 from slack.handler import (
     _build_middleware_chain,
     _check_setup_gating,

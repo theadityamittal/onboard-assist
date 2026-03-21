@@ -6,6 +6,7 @@ from unittest.mock import MagicMock
 
 import pytest
 from botocore.exceptions import ClientError
+
 from state.dynamo import DynamoStateStore
 from state.models import (
     CompletionRecord,

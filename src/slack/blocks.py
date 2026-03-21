@@ -52,9 +52,7 @@ def calendar_confirmation(
     """
     attendee_text = ", ".join(attendees) if attendees else "_No attendees_"
     detail_text = (
-        f"*{title}*\n"
-        f":calendar: {date} at {time}\n"
-        f":busts_in_silhouette: {attendee_text}"
+        f"*{title}*\n:calendar: {date} at {time}\n:busts_in_silhouette: {attendee_text}"
     )
     return [
         _section(detail_text),
@@ -109,7 +107,7 @@ def channel_mapping(
     ]
 
     blocks: list[dict] = [
-        _section("*Channel Mapping*\n" "Select a Slack channel for each team.")
+        _section("*Channel Mapping*\nSelect a Slack channel for each team.")
     ]
 
     initial_option = None

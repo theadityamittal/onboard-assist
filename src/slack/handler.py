@@ -21,11 +21,12 @@ from typing import Any
 from urllib.parse import parse_qs
 
 import boto3
+from slack_sdk import WebClient
+
 from slack.client import SlackClient
 from slack.commands import handle_command
 from slack.models import SlackCommand, SlackEvent, SQSMessage
 from slack.signature import InvalidSignatureError, verify_slack_signature
-from slack_sdk import WebClient
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)

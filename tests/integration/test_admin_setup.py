@@ -11,6 +11,7 @@ import json
 from unittest.mock import MagicMock, patch
 
 import pytest
+
 from admin.setup import SetupDependencies, process_setup_message
 from state.models import (
     OnboardingPlan,

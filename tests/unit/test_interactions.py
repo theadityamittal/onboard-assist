@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 from urllib.parse import urlencode
 
 import pytest
+
 from slack.handler import _handle_interaction, lambda_handler
 from slack.models import EventType, SQSMessage
 

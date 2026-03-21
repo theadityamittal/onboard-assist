@@ -8,8 +8,9 @@ import os
 from typing import Any
 
 import boto3
-from slack.client import SlackClient
 from slack_sdk import WebClient
+
+from slack.client import SlackClient
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)

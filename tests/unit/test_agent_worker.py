@@ -5,8 +5,9 @@ from __future__ import annotations
 import json
 from unittest.mock import MagicMock, patch
 
-import agent.worker as _worker_module
 import pytest
+
+import agent.worker as _worker_module
 from agent.worker import _get_bot_token, lambda_handler
 
 

@@ -180,7 +180,7 @@ def _handle_awaiting_url(
         deps.slack_client.send_message(
             channel=state.admin_user_id,
             text=(
-                "Please share your company's website URL " "(e.g. https://example.com)."
+                "Please share your company's website URL (e.g. https://example.com)."
             ),
         )
         return state
