@@ -17,6 +17,19 @@ Built as a distributable platform. Any Slack workspace can install it. [Changing
 
 I volunteered at Changing the Present and watched the same onboarding happen differently every time depending on who was running it. New volunteers got inconsistent info, team leads repeated themselves constantly, and nobody knew who'd actually finished orientation. This is my attempt to fix that with a bot.
 
+## Highlights
+
+- **Agentic orchestrator**: 5-loop ReAct engine with 5 tool types (search KB, send message, assign channel, calendar event, manage progress) and frozen-step replanning
+- **Dual-LLM routing**: Gemini Flash Lite for reasoning, Flash for generation — keeps inference costs low while preserving response quality
+- **RAG pipeline**: Web scraping, sentence-boundary chunking, Pinecone vector search, and 4-factor confidence scoring (similarity, count, keyword overlap, content length)
+- **7-layer middleware**: Split between handler (5 CPU-only checks, sub-3s for Slack timeout) and worker (input sanitizer, token budget guard)
+- **4-layer cost protection**: Per-turn budget, daily user cap, monthly workspace cap, and an SNS-triggered kill switch that throttles API Gateway on breach
+- **Multi-tenant**: Workspace-isolated DynamoDB single-table design with 11 record types, KMS-encrypted secrets, and namespace-separated vector indices
+- **Dual OAuth**: Slack workspace install + Google Calendar linking with KMS field-level encryption for tokens
+- **Security**: HMAC signature verification, 8 regex injection patterns with 3-strike auto-ban, output validators that block prompt leaks
+- **7-step setup wizard**: Admin state machine with Lambda timeout self-enqueue and LLM fallback guidance
+- **49 source files, 63 test files**, 90%+ coverage enforced in CI, 3-stage pipeline (unit, integration, E2E)
+
 ## How it works
 
 ```
@@ -182,6 +195,7 @@ sherpa/
 │   │   ├── signature.py             # HMAC-SHA256 signature verification
 │   │   ├── client.py                # Slack API wrapper
 │   │   ├── commands.py              # Slash command handlers
+│   │   ├── queue.py                # SQS message enqueue (shared by handler and commands)
 │   │   └── blocks.py                # Block Kit message builders
 │   ├── middleware/
 │   │   ├── inbound/                 # Handler: EventTypeFilter, BotFilter, EmptyFilter, ConcurrencyGuard
@@ -207,7 +221,7 @@ sherpa/
 │   ├── state/
 │   │   ├── dynamo.py                # DynamoDB single-table operations
 │   │   ├── models.py                # Frozen dataclasses (Plan, Steps, Usage, WorkspaceConfig)
-│   │   └── ttl.py                   # TTL policies (60s locks, 90d plans, permanent completions)
+│   │   └── ttl.py                   # TTL policies (15s locks, 90d plans, permanent completions)
 │   ├── security/
 │   │   └── crypto.py                # KMS field-level encryption (bot tokens)
 │   ├── gcal/
@@ -222,6 +236,7 @@ sherpa/
 ├── tests/
 │   ├── unit/                        # Per-module unit tests
 │   ├── integration/                 # Mocked AWS integration tests
+│   ├── e2e/                         # End-to-end tests (live infrastructure)
 │   └── conftest.py                  # Shared fixtures
 ├── infra/
 │   └── template.yaml                # SAM template (AWS resources)
@@ -248,7 +263,7 @@ sherpa/
 | `WORKSPACE#{id}` | `COMPLETED#{user_id}` | Completion record (kept forever for audit) | Never |
 | `WORKSPACE#{id}` | `USAGE#{user_id}#{date}` | Per-user daily turn count | 7 days |
 | `WORKSPACE#{id}` | `USAGE#{yyyy-mm}` | Per-workspace monthly estimated cost | 30 days |
-| `WORKSPACE#{id}` | `LOCK#{user_id}` | Processing lock (prevents duplicate work) | 60 seconds |
+| `WORKSPACE#{id}` | `LOCK#{user_id}` | Processing lock (prevents duplicate work) | 15 seconds |
 | `WORKSPACE#{id}` | `OAUTH#GOOGLE#{user_id}` | Google Calendar refresh tokens | 90 days |
 | `SYSTEM` | `KILL_SWITCH` | Global kill switch flag | -- |
 | `SECURITY` | `INJECTION#{ts}` | Logged injection attempts | 90 days |
